@@ -10,6 +10,7 @@ const GAME_ENGINE_CONFIG = {
   namedRanges: [
     'NR_GAME_CORE',
     'NR_WORLD',
+    'NR_FACTORIES',
     'NR_JOURNAL',
     'NR_COUNTRIES',
     // 'NR_PLAYERS',
@@ -43,6 +44,13 @@ const GAME_ENGINE_CONFIG = {
       sheetName: '_GAME_WORLD',
       initialValuesFactory: createWorldInitialValues,
     },
+    // One technical header plus 10,000 factory JSON slots.
+    NR_FACTORIES: {
+      rows: 10001,
+      columns: 1,
+      sheetName: '_GAME_FACTORIES',
+      initialValuesFactory: createFactoriesInitialValues,
+    },
     NR_JOURNAL: { rows: 500, columns: 1, sheetName: '_GAME_JOURNAL' },
     // First row is reserved for technical country IDs, such as RUS or FRA.
     NR_COUNTRIES: { rows: 25, columns: 10, sheetName: '_GAME_COUNTRIES' },
@@ -64,6 +72,11 @@ const GAME_ENGINE_CONFIG = {
       dataStartRow: 1,
     },
     NR_WORLD: {
+      mode: 'COLUMN_MATRICES',
+      headerRow: 0,
+      dataStartRow: 1,
+    },
+    NR_FACTORIES: {
       mode: 'COLUMN_MATRICES',
       headerRow: 0,
       dataStartRow: 1,
@@ -117,7 +130,8 @@ const GAME_ENGINE_CONFIG = {
   // Register systems here. Smaller priority runs first.
   systems: [
     // { id: 'ORDERS', priority: 100, handler: processOrders },
-    // { id: 'ECONOMY', priority: 500, handler: processEconomy },
+    { id: 'FACTORIES', priority: 500, handler: processFactories },
+    // { id: 'ECONOMY', priority: 600, handler: processEconomy },
   ],
 
   // A validator may return false, a string, or an array of error strings to abort saving.
@@ -176,6 +190,11 @@ function onOpen() {
 /** Public entry point: fills blank/partial cells of NR_WORLD.PROVINCES with JSON data. */
 function GENERATE_PROVINCES() {
   return ProvinceGenerator.generate();
+}
+
+/** Adapter: the implementation lives in the separate FactorySystem.gs file. */
+function processFactories(ctx) {
+  return FactorySystem.process(ctx);
 }
 
 const GameEngine = {
@@ -634,6 +653,10 @@ function createGameCoreInitialValues(rows, columns) {
   const matrix = createBlankMatrix(rows, columns);
   matrix[0][0] = 'MAIN';
   matrix[1][0] = { turn: 1, status: 'WAITING' };
+  if (columns > 1) {
+    matrix[0][1] = 'FACTORY_TEMPLATES';
+    matrix[1][1] = createDefaultFactoryTemplate();
+  }
   return matrix;
 }
 
@@ -641,6 +664,25 @@ function createWorldInitialValues(rows, columns) {
   const matrix = createBlankMatrix(rows, columns);
   matrix[0][0] = 'PROVINCES';
   return matrix;
+}
+
+function createFactoriesInitialValues(rows, columns) {
+  const matrix = createBlankMatrix(rows, columns);
+  matrix[0][0] = 'FACTORIES';
+  return matrix;
+}
+
+/** A safe starter template. FactorySystem adds it to older containers as needed. */
+function createDefaultFactoryTemplate() {
+  return {
+    id: 'TEXTILE_MILL',
+    name: 'Текстильная фабрика',
+    inputs: { cotton: 2, coal: 0.1 },
+    outputs: { clothes: 1 },
+    productionPerLevel: 1,
+    workersPerLevel: 10000,
+    pollutionPerCycle: 2,
+  };
 }
 
 function createEmptyColumnMatrix(rows) {

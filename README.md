@@ -5,9 +5,9 @@
 ## Quick start
 
 1. Open the target spreadsheet: **Extensions → Apps Script**.
-2. Create a script file named `GameEngine.gs` and paste in [GameEngine.gs](GameEngine.gs).
-3. By default, every missing active range is created on its own sheet at the start of `PROCESS_TURN`: `_GAME_CORE`, `_GAME_WORLD`, `_GAME_COUNTRIES`, and `_GAME_JOURNAL`.
-4. `NR_GAME_CORE` is initialized with technical header `MAIN` and game metadata directly beneath it:
+2. Create script files named `GameEngine.gs` and `FactorySystem.gs`, then paste in [GameEngine.gs](GameEngine.gs) and [FactorySystem.gs](FactorySystem.gs).
+3. By default, every missing active range is created on its own sheet at the start of `PROCESS_TURN`: `_GAME_CORE`, `_GAME_WORLD`, `_GAME_FACTORIES`, `_GAME_COUNTRIES`, and `_GAME_JOURNAL`.
+4. `NR_GAME_CORE` is initialized with technical headers `MAIN` and `FACTORY_TEMPLATES`. The latter contains the editable base template `TEXTILE_MILL`; older containers receive the missing column and template on the next `PROCESS_TURN`, without replacing existing data. `_GAME_FACTORIES` likewise receives the missing `FACTORIES` column, but starts with no factory instances.
 
    ```json
    {"turn":1,"status":"WAITING"}
@@ -36,11 +36,32 @@ A container is one physical named range read in one `getValues()` call and writt
 ```text
 NR_GAME_CORE: MAIN | BUILDING_TEMPLATES | UNIT_TEMPLATES | RULES
 NR_WORLD:     PROVINCES | UNITS | BUILDINGS | EFFECTS
+NR_FACTORIES: FACTORIES
 NR_COUNTRIES: RUS | FRA | GER
 NR_JOURNAL:   separate, one message per cell
 ```
 
 `NR_GAME_CORE.MAIN` contains game metadata, so its turn is available as `ctx.data.NR_GAME_CORE.MAIN[0][0].turn`. `NR_WORLD.PROVINCES` is the province matrix used by the province generator.
+
+`NR_FACTORIES.FACTORIES` contains one factory JSON object per cell and has 10,000 data slots (plus its technical header) on `_GAME_FACTORIES`. A factory's input and output goods belong in its own `stockpile` object rather than in a country-level stockpile.
+
+## Factory system
+
+[FactorySystem.gs](FactorySystem.gs) is a separate turn-mechanics file and is already registered in `GAME_ENGINE_CONFIG.systems` as `FACTORIES`. Add both script files to the Apps Script project. The system uses only the factory's own `stockpile`: it consumes inputs, adds outputs to that stockpile, scales production by workers/level/efficiency, handles construction completion, and applies factory pollution to its province. It does not use a country stockpile or market.
+
+`NR_GAME_CORE.FACTORY_TEMPLATES` is created automatically and begins with this editable template:
+
+```json
+{"id":"TEXTILE_MILL","inputs":{"cotton":2,"coal":0.1},"outputs":{"clothes":1},"productionPerLevel":1,"workersPerLevel":10000,"pollutionPerCycle":2}
+```
+
+Put factory instances in `NR_FACTORIES.FACTORIES`:
+
+```json
+{"id":"factory_rus_1","templateId":"TEXTILE_MILL","owner":"RUS","provinceId":"prov_1","level":1,"workers":8000,"efficiency":1,"stockpile":{"cotton":20,"coal":3,"clothes":0},"status":"ACTIVE"}
+```
+
+For every production cycle, input quantities are removed from the factory stockpile and output quantities are added to that same object. `CONSTRUCTING`, `ACTIVE`, and `PAUSED` are supported statuses. Warnings about missing templates, workers, or input goods and construction-completion events go to the game journal.
 
 `NR_COUNTRIES` is configured as a country container. The first row holds technical country IDs; every following non-empty cell must be a small JSON object with a unique `key` in that country's column:
 
