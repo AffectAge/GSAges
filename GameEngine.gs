@@ -8,9 +8,10 @@
 const GAME_ENGINE_CONFIG = {
   // Add every game range here.  Or set loadAllNamedRanges: true.
   namedRanges: [
-    'NR_GAME_META',
+    'NR_GAME_CORE',
+    'NR_WORLD',
     'NR_JOURNAL',
-    'NR_PROVINCES',
+    'NR_COUNTRIES',
     // 'NR_PLAYERS',
     // 'NR_CITIES',
     // 'NR_UNITS',
@@ -22,21 +23,29 @@ const GAME_ENGINE_CONFIG = {
   // Keep false when the spreadsheet contains service/UI ranges that must not be saved.
   loadAllNamedRanges: false,
 
-  // Missing explicitly configured ranges are created on this sheet before LOAD.
+  // Fallback sheet for a range without an explicit sheetName.
   // Automatically discovered ranges (loadAllNamedRanges) cannot be created because
   // their names are not known until they already exist.
   autoCreateMissingRanges: true,
   autoCreateSheetName: '_GAME_DATA',
   defaultNewRange: { rows: 1, columns: 1 },
   rangeDefaults: {
-    NR_GAME_META: {
-      rows: 1,
-      columns: 1,
-      initialValues: [[{ turn: 1, status: 'WAITING' }]],
+    NR_GAME_CORE: {
+      rows: 10,
+      columns: 10,
+      sheetName: '_GAME_CORE',
+      initialValuesFactory: createGameCoreInitialValues,
     },
-    NR_JOURNAL: { rows: 500, columns: 1 },
-    // Change the size before first use, or define the named range manually.
-    NR_PROVINCES: { rows: 1, columns: 1 },
+    // Increase rows before adding many provinces, units, or buildings.
+    NR_WORLD: {
+      rows: 2,
+      columns: 100,
+      sheetName: '_GAME_WORLD',
+      initialValuesFactory: createWorldInitialValues,
+    },
+    NR_JOURNAL: { rows: 500, columns: 1, sheetName: '_GAME_JOURNAL' },
+    // First row is reserved for technical country IDs, such as RUS or FRA.
+    NR_COUNTRIES: { rows: 25, columns: 10, sheetName: '_GAME_COUNTRIES' },
     // Example when adding a range:
     // NR_PLAYERS: { rows: 100, columns: 1 },
   },
@@ -46,7 +55,29 @@ const GAME_ENGINE_CONFIG = {
     // 'NR_RULES',
   ],
 
-  gameMetaRange: 'NR_GAME_META',
+  // A container is read and (when changed) written in one batch. Containers may
+  // expose their columns as virtual named ranges or as country record collections.
+  containers: {
+    NR_GAME_CORE: {
+      mode: 'COLUMN_MATRICES',
+      headerRow: 0,
+      dataStartRow: 1,
+    },
+    NR_WORLD: {
+      mode: 'COLUMN_MATRICES',
+      headerRow: 0,
+      dataStartRow: 1,
+    },
+    NR_COUNTRIES: {
+      mode: 'KEYED_JSON_ROWS',
+      headerRow: 0,
+      dataStartRow: 1,
+      recordKey: 'key',
+    },
+  },
+
+  gameMetaRange: 'NR_GAME_CORE',
+  gameMetaSubrange: 'MAIN',
   // Zero-based position of an object such as {"turn": 45, "status": "WAITING"}.
   gameMetaCell: { row: 0, column: 0 },
 
@@ -100,7 +131,8 @@ const GAME_ENGINE_CONFIG = {
  * every generator run; existing values, including 0, false, and null, stay intact.
  */
 const PROVINCE_GENERATOR_CONFIG = {
-  rangeName: 'NR_PROVINCES',
+  rangeName: 'NR_WORLD',
+  subrange: 'PROVINCES',
   idPrefix: 'prov_',
   namePrefix: 'Провинция ',
   // When absent, the first generated province receives this ID. Every other
@@ -141,7 +173,7 @@ function onOpen() {
     .addToUi();
 }
 
-/** Public entry point: fills blank/partial cells of NR_PROVINCES with JSON data. */
+/** Public entry point: fills blank/partial cells of NR_WORLD.PROVINCES with JSON data. */
 function GENERATE_PROVINCES() {
   return ProvinceGenerator.generate();
 }
@@ -198,8 +230,8 @@ const GameEngine = {
 
 /** Reads/writes matrices without losing a cell's position in its named range. */
 const NamedRangeStorage = {
-  load: function (spreadsheet, config) {
-    const names = this._getManagedNames(spreadsheet, config);
+  load: function (spreadsheet, config, selectedNames) {
+    const names = selectedNames || this._getManagedNames(spreadsheet, config);
     const createdRanges = this._createMissingRanges(spreadsheet, names, config);
     const data = Object.create(null);
     const bindings = Object.create(null);
@@ -211,14 +243,27 @@ const NamedRangeStorage = {
       }
 
       const values = range.getValues();
-      data[name] = values.map(function (row) {
+      const matrix = values.map(function (row) {
         return row.map(CellCodec.decode);
       });
-      bindings[name] = {
+      const containerDefinition = config.containers && config.containers[name];
+      const binding = {
         range: range,
         rows: range.getNumRows(),
         columns: range.getNumColumns(),
+        columnCount: range.getNumColumns(),
+        type: containerDefinition ? 'CONTAINER' : 'MATRIX',
+        matrix: matrix,
+        snapshot: matrixSignature(matrix),
       };
+
+      if (containerDefinition) {
+        binding.definition = containerDefinition;
+        data[name] = ContainerStorage.createView(binding, name);
+      } else {
+        data[name] = matrix;
+      }
+      bindings[name] = binding;
     });
 
     return { data: data, bindings: bindings, createdRanges: createdRanges };
@@ -231,13 +276,20 @@ const NamedRangeStorage = {
       if (readOnly[name]) return;
 
       const binding = loaded.bindings[name];
-      const matrix = loaded.data[name];
+      let matrix = loaded.data[name];
+      if (binding.type === 'CONTAINER') {
+        ContainerStorage.sync(binding, loaded.data[name], name);
+        matrix = binding.matrix;
+      }
       assertMatrixShape(matrix, binding.rows, binding.columns, name);
+
+      if (matrixSignature(matrix) === binding.snapshot) return;
 
       const encoded = matrix.map(function (row) {
         return row.map(CellCodec.encode);
       });
       binding.range.setValues(encoded);
+      binding.snapshot = matrixSignature(matrix);
     });
   },
 
@@ -303,9 +355,12 @@ const NamedRangeStorage = {
       const range = sheet.getRange(startRow, startColumn, rows, columns);
       spreadsheet.setNamedRange(name, range);
 
-      if (definition.initialValues !== undefined) {
-        assertMatrixShape(definition.initialValues, rows, columns, 'initialValues for ' + name);
-        range.setValues(definition.initialValues.map(function (row) {
+      const initialValues = definition.initialValuesFactory
+        ? definition.initialValuesFactory(rows, columns)
+        : definition.initialValues;
+      if (initialValues !== undefined) {
+        assertMatrixShape(initialValues, rows, columns, 'initialValues for ' + name);
+        range.setValues(initialValues.map(function (row) {
           return row.map(CellCodec.encode);
         }));
       }
@@ -317,6 +372,283 @@ const NamedRangeStorage = {
   },
 };
 
+/**
+ * Converts a physical named range into virtual subranges without extra Sheets API
+ * calls. COLUMN_MATRICES exposes each headed column as a one-column matrix.
+ * KEYED_JSON_ROWS additionally indexes JSON records in a country column by .key.
+ */
+const ContainerStorage = {
+  createView: function (binding, rangeName) {
+    const definition = binding.definition || {};
+    const headerRow = Number(definition.headerRow);
+    const dataStartRow = Number(definition.dataStartRow);
+    if (!Number.isInteger(headerRow) || headerRow < 0 || headerRow >= binding.rows) {
+      throw new Error('Invalid headerRow for container ' + rangeName + '.');
+    }
+    if (!Number.isInteger(dataStartRow) || dataStartRow <= headerRow || dataStartRow >= binding.rows) {
+      throw new Error('Invalid dataStartRow for container ' + rangeName + '.');
+    }
+
+    binding.headerRow = headerRow;
+    binding.dataStartRow = dataStartRow;
+    binding.columnBindings = Object.create(null);
+
+    const mode = definition.mode || 'COLUMN_MATRICES';
+    if (mode === 'COLUMN_MATRICES') {
+      return this._createColumnMatrixView(binding, rangeName);
+    }
+    if (mode === 'KEYED_JSON_ROWS') {
+      return this._createKeyedRecordView(binding, rangeName);
+    }
+    throw new Error('Unknown container mode ' + mode + ' for ' + rangeName + '.');
+  },
+
+  sync: function (binding, view, rangeName) {
+    const mode = binding.definition.mode || 'COLUMN_MATRICES';
+    if (mode === 'COLUMN_MATRICES') {
+      this._syncColumnMatrixView(binding, view, rangeName);
+      return;
+    }
+    if (mode === 'KEYED_JSON_ROWS') {
+      this._syncKeyedRecordView(binding, view, rangeName);
+      return;
+    }
+    throw new Error('Unknown container mode ' + mode + ' for ' + rangeName + '.');
+  },
+
+  _createColumnMatrixView: function (binding, rangeName) {
+    const view = Object.create(null);
+    for (let column = 0; column < binding.columnCount; column += 1) {
+      const key = readContainerKey(binding.matrix[binding.headerRow][column]);
+      if (!key) continue;
+      this._assertUniqueColumn(binding, key, rangeName);
+
+      const columnMatrix = [];
+      for (let row = binding.dataStartRow; row < binding.rows; row += 1) {
+        columnMatrix.push([binding.matrix[row][column]]);
+      }
+      view[key] = columnMatrix;
+      binding.columnBindings[key] = { column: column };
+    }
+    return view;
+  },
+
+  _syncColumnMatrixView: function (binding, view, rangeName) {
+    assertContainerView(view, rangeName);
+    const dataRows = binding.rows - binding.dataStartRow;
+    const self = this;
+
+    Object.keys(view).forEach(function (key) {
+      let columnBinding = binding.columnBindings[key];
+      if (!columnBinding) {
+        const column = self._findEmptyColumn(binding);
+        if (column === -1) {
+          throw new Error('No blank column is available for subrange ' + key + ' in ' + rangeName + '.');
+        }
+        binding.matrix[binding.headerRow][column] = key;
+        columnBinding = { column: column };
+        binding.columnBindings[key] = columnBinding;
+      }
+
+      const columnMatrix = view[key];
+      assertMatrixShape(columnMatrix, dataRows, 1, rangeName + '.' + key);
+      for (let index = 0; index < dataRows; index += 1) {
+        binding.matrix[binding.dataStartRow + index][columnBinding.column] = columnMatrix[index][0];
+      }
+    });
+  },
+
+  _createKeyedRecordView: function (binding, rangeName) {
+    const view = Object.create(null);
+    const recordKeyField = binding.definition.recordKey || 'key';
+    binding.recordKeyField = recordKeyField;
+
+    for (let column = 0; column < binding.columnCount; column += 1) {
+      const countryId = readContainerKey(binding.matrix[binding.headerRow][column]);
+      if (!countryId) continue;
+      this._assertUniqueColumn(binding, countryId, rangeName);
+
+      const country = Object.create(null);
+      const columnBinding = { column: column, records: Object.create(null) };
+      binding.columnBindings[countryId] = columnBinding;
+      view[countryId] = country;
+
+      for (let row = binding.dataStartRow; row < binding.rows; row += 1) {
+        const record = binding.matrix[row][column];
+        if (record === null || record === undefined) continue;
+        const recordId = this._validateRecord(record, recordKeyField, rangeName, countryId, row);
+        if (columnBinding.records[recordId]) {
+          throw new Error('Duplicate record key ' + recordId + ' in ' + rangeName + '.' + countryId + '.');
+        }
+        columnBinding.records[recordId] = { row: row };
+        this._defineRecordProperty(country, recordId, binding, column, row);
+      }
+    }
+    return view;
+  },
+
+  _syncKeyedRecordView: function (binding, view, rangeName) {
+    assertContainerView(view, rangeName);
+    const self = this;
+
+    Object.keys(view).forEach(function (countryId) {
+      let columnBinding = binding.columnBindings[countryId];
+      const country = view[countryId];
+      if (!isPlainObject(country)) {
+        throw new Error(rangeName + '.' + countryId + ' must be an object of JSON records.');
+      }
+
+      if (!columnBinding) {
+        const column = self._findEmptyColumn(binding);
+        if (column === -1) {
+          throw new Error('No blank column is available for country ' + countryId + ' in ' + rangeName + '.');
+        }
+        binding.matrix[binding.headerRow][column] = countryId;
+        columnBinding = { column: column, records: Object.create(null) };
+        binding.columnBindings[countryId] = columnBinding;
+      }
+
+      Object.keys(columnBinding.records).forEach(function (recordId) {
+        if (!Object.prototype.hasOwnProperty.call(country, recordId)) {
+          binding.matrix[columnBinding.records[recordId].row][columnBinding.column] = null;
+          delete columnBinding.records[recordId];
+        }
+      });
+
+      Object.keys(country).forEach(function (recordId) {
+        let recordBinding = columnBinding.records[recordId];
+        if (!recordBinding) {
+          const row = self._findEmptyRow(binding, columnBinding.column);
+          if (row === -1) {
+            throw new Error('No blank row is available for ' + recordId + ' in ' + rangeName + '.' + countryId + '.');
+          }
+          recordBinding = { row: row };
+          columnBinding.records[recordId] = recordBinding;
+        }
+
+        const normalized = self._normalizeRecord(country[recordId], binding.recordKeyField, recordId, rangeName, countryId);
+        binding.matrix[recordBinding.row][columnBinding.column] = normalized;
+        self._defineRecordProperty(country, recordId, binding, columnBinding.column, recordBinding.row);
+      });
+    });
+  },
+
+  _defineRecordProperty: function (country, recordId, binding, column, row) {
+    Object.defineProperty(country, recordId, {
+      enumerable: true,
+      configurable: true,
+      get: function () {
+        return binding.matrix[row][column];
+      },
+      set: function (value) {
+        binding.matrix[row][column] = ContainerStorage._normalizeRecord(
+          value,
+          binding.recordKeyField,
+          recordId,
+          'container',
+          'record'
+        );
+      },
+    });
+  },
+
+  _normalizeRecord: function (record, recordKeyField, recordId, rangeName, countryId) {
+    if (!isPlainObject(record)) {
+      throw new Error(rangeName + '.' + countryId + '.' + recordId + ' must be a JSON object.');
+    }
+    const existingId = readContainerKey(record[recordKeyField]);
+    if (existingId && existingId !== recordId) {
+      throw new Error('Record key mismatch in ' + rangeName + '.' + countryId + ': ' + existingId + ' != ' + recordId + '.');
+    }
+    record[recordKeyField] = recordId;
+    return record;
+  },
+
+  _validateRecord: function (record, recordKeyField, rangeName, countryId, row) {
+    if (!isPlainObject(record)) {
+      throw new Error(rangeName + '.' + countryId + ' row ' + row + ' must contain a JSON object.');
+    }
+    const recordId = readContainerKey(record[recordKeyField]);
+    if (!recordId) {
+      throw new Error(rangeName + '.' + countryId + ' row ' + row + ' has no ' + recordKeyField + '.');
+    }
+    return recordId;
+  },
+
+  _assertUniqueColumn: function (binding, key, rangeName) {
+    if (binding.columnBindings[key]) {
+      throw new Error('Duplicate technical header ' + key + ' in ' + rangeName + '.');
+    }
+  },
+
+  _findEmptyColumn: function (binding) {
+    for (let column = 0; column < binding.columnCount; column += 1) {
+      if (readContainerKey(binding.matrix[binding.headerRow][column])) continue;
+      let isEmpty = true;
+      for (let row = binding.dataStartRow; row < binding.rows; row += 1) {
+        if (binding.matrix[row][column] !== null && binding.matrix[row][column] !== undefined) {
+          isEmpty = false;
+          break;
+        }
+      }
+      if (isEmpty) return column;
+    }
+    return -1;
+  },
+
+  _findEmptyRow: function (binding, column) {
+    for (let row = binding.dataStartRow; row < binding.rows; row += 1) {
+      if (binding.matrix[row][column] === null || binding.matrix[row][column] === undefined) {
+        return row;
+      }
+    }
+    return -1;
+  },
+};
+
+function readContainerKey(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+function assertContainerView(view, rangeName) {
+  if (!isPlainObject(view)) {
+    throw new Error('Container ' + rangeName + ' was replaced with a non-object value.');
+  }
+}
+
+function matrixSignature(matrix) {
+  return JSON.stringify(matrix);
+}
+
+function createBlankMatrix(rows, columns) {
+  const matrix = [];
+  for (let row = 0; row < rows; row += 1) {
+    const values = [];
+    for (let column = 0; column < columns; column += 1) values.push('');
+    matrix.push(values);
+  }
+  return matrix;
+}
+
+function createGameCoreInitialValues(rows, columns) {
+  const matrix = createBlankMatrix(rows, columns);
+  matrix[0][0] = 'MAIN';
+  matrix[1][0] = { turn: 1, status: 'WAITING' };
+  return matrix;
+}
+
+function createWorldInitialValues(rows, columns) {
+  const matrix = createBlankMatrix(rows, columns);
+  matrix[0][0] = 'PROVINCES';
+  return matrix;
+}
+
+function createEmptyColumnMatrix(rows) {
+  const matrix = [];
+  for (let row = 0; row < rows; row += 1) matrix.push([null]);
+  return matrix;
+}
+
 const ProvinceGenerator = {
   generate: function () {
     const lock = LockService.getDocumentLock();
@@ -324,27 +656,20 @@ const ProvinceGenerator = {
 
     try {
       const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-      let range = spreadsheet.getRangeByName(PROVINCE_GENERATOR_CONFIG.rangeName);
-      if (!range) {
-        NamedRangeStorage._createMissingRanges(
-          spreadsheet,
-          [PROVINCE_GENERATOR_CONFIG.rangeName],
-          GAME_ENGINE_CONFIG
-        );
-        range = spreadsheet.getRangeByName(PROVINCE_GENERATOR_CONFIG.rangeName);
+      const loaded = NamedRangeStorage.load(
+        spreadsheet,
+        GAME_ENGINE_CONFIG,
+        [PROVINCE_GENERATOR_CONFIG.rangeName]
+      );
+      const container = loaded.data[PROVINCE_GENERATOR_CONFIG.rangeName];
+      let matrix = container[PROVINCE_GENERATOR_CONFIG.subrange];
+      if (!matrix) {
+        const binding = loaded.bindings[PROVINCE_GENERATOR_CONFIG.rangeName];
+        matrix = createEmptyColumnMatrix(binding.rows - binding.dataStartRow);
+        container[PROVINCE_GENERATOR_CONFIG.subrange] = matrix;
       }
-      if (!range) {
-        throw new Error('Could not create province range ' + PROVINCE_GENERATOR_CONFIG.rangeName + '.');
-      }
-
-      const matrix = range.getValues().map(function (row) {
-        return row.map(CellCodec.decode);
-      });
       const report = this._fillMissingProvinceData(matrix);
-
-      range.setValues(matrix.map(function (row) {
-        return row.map(CellCodec.encode);
-      }));
+      NamedRangeStorage.save(loaded, GAME_ENGINE_CONFIG);
 
       writeServerLog(
         '[INFO][PROVINCE_GENERATOR] Created: ' + report.created + ', updated: ' + report.updated + '.'
@@ -502,7 +827,7 @@ function createTurnContext(data, startedAt) {
   const meta = getGameMeta(data);
   const turn = Number(meta.turn);
   if (!Number.isInteger(turn) || turn < 0) {
-    throw new Error('NR_GAME_META.turn must be a non-negative integer.');
+    throw new Error('NR_GAME_CORE.MAIN.turn must be a non-negative integer.');
   }
 
   const context = {
@@ -520,17 +845,20 @@ function createTurnContext(data, startedAt) {
 
 function getGameMeta(data) {
   const rangeName = GAME_ENGINE_CONFIG.gameMetaRange;
-  const matrix = data[rangeName];
+  const container = data[rangeName];
+  const subrange = GAME_ENGINE_CONFIG.gameMetaSubrange;
+  const matrix = subrange ? container && container[subrange] : container;
   const position = GAME_ENGINE_CONFIG.gameMetaCell;
 
   if (!matrix || !matrix[position.row] || matrix[position.row][position.column] === undefined) {
-    throw new Error('Game meta cell is outside range ' + rangeName + '.');
+    throw new Error('Game meta cell is outside ' + rangeName + (subrange ? '.' + subrange : '') + '.');
   }
 
   const meta = matrix[position.row][position.column];
   if (!meta || typeof meta !== 'object' || Array.isArray(meta) || meta instanceof Date) {
     throw new Error(
-      rangeName + ' at [' + position.row + ',' + position.column + '] must contain a JSON object, for example {"turn": 1}.'
+      rangeName + (subrange ? '.' + subrange : '') +
+      ' at [' + position.row + ',' + position.column + '] must contain a JSON object, for example {"turn": 1}.'
     );
   }
   return meta;
@@ -658,7 +986,19 @@ const SystemJournal = {
     if (!metaRange) return 0;
     const position = GAME_ENGINE_CONFIG.gameMetaCell;
     const values = metaRange.getValues();
-    const raw = values[position.row] && values[position.row][position.column];
+    let raw;
+    if (GAME_ENGINE_CONFIG.gameMetaSubrange) {
+      const definition = GAME_ENGINE_CONFIG.containers[GAME_ENGINE_CONFIG.gameMetaRange];
+      const headerRow = definition && definition.headerRow;
+      const dataStartRow = definition && definition.dataStartRow;
+      const headers = values[headerRow] || [];
+      const column = headers.map(readContainerKey).indexOf(GAME_ENGINE_CONFIG.gameMetaSubrange);
+      raw = column === -1 || !values[dataStartRow + position.row]
+        ? null
+        : values[dataStartRow + position.row][column];
+    } else {
+      raw = values[position.row] && values[position.row][position.column];
+    }
     const meta = CellCodec.decode(raw);
     return meta && Number.isInteger(meta.turn) ? meta.turn : 0;
   },
@@ -907,7 +1247,7 @@ function runValidators(context, validators) {
 /** Basic invariant; add game-specific validators in GAME_ENGINE_CONFIG.validators. */
 function validateCoreGameState(context) {
   if (context.meta.turn !== context.turn) {
-    return 'NR_GAME_META.turn was changed by a system. Change it only through engine configuration.';
+    return 'NR_GAME_CORE.MAIN.turn was changed by a system. Change it only through engine configuration.';
   }
   return true;
 }

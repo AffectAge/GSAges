@@ -6,8 +6,8 @@
 
 1. Open the target spreadsheet: **Extensions → Apps Script**.
 2. Create a script file named `GameEngine.gs` and paste in [GameEngine.gs](GameEngine.gs).
-3. By default, missing explicitly configured named ranges are created automatically on `_GAME_DATA` at the start of `PROCESS_TURN`. This creates `NR_GAME_META` with turn `1` and a 500-cell `NR_JOURNAL`.
-4. To create a range manually instead, create it with the same name. In the first cell of `NR_GAME_META`, put:
+3. By default, every missing active range is created on its own sheet at the start of `PROCESS_TURN`: `_GAME_CORE`, `_GAME_WORLD`, `_GAME_COUNTRIES`, and `_GAME_JOURNAL`.
+4. `NR_GAME_CORE` is initialized with technical header `MAIN` and game metadata directly beneath it:
 
    ```json
    {"turn":1,"status":"WAITING"}
@@ -29,13 +29,50 @@ Blank cells become `null`. JSON objects and arrays are decoded automatically; no
 
 The engine currently reads values, not formula definitions. Do not place formulas in a writable engine range. Put calculated/formula ranges in `readOnlyRanges` instead.
 
+## Containers and country data
+
+A container is one physical named range read in one `getValues()` call and written in at most one `setValues()` call. Its technical headers create virtual data areas in `ctx.data`, avoiding a named range and a Sheets API call for every mechanic. The engine's active data layout is:
+
+```text
+NR_GAME_CORE: MAIN | BUILDING_TEMPLATES | UNIT_TEMPLATES | RULES
+NR_WORLD:     PROVINCES | UNITS | BUILDINGS | EFFECTS
+NR_COUNTRIES: RUS | FRA | GER
+NR_JOURNAL:   separate, one message per cell
+```
+
+`NR_GAME_CORE.MAIN` contains game metadata, so its turn is available as `ctx.data.NR_GAME_CORE.MAIN[0][0].turn`. `NR_WORLD.PROVINCES` is the province matrix used by the province generator.
+
+`NR_COUNTRIES` is configured as a country container. The first row holds technical country IDs; every following non-empty cell must be a small JSON object with a unique `key` in that country's column:
+
+```text
+RUS                                           | FRA
+{"key":"CORE","name":"Russia"}           | {"key":"CORE","name":"France"}
+{"key":"ECONOMY","treasury":1000}         | {"key":"ECONOMY","treasury":800}
+{"key":"MILITARY","manpower":50000}       |
+```
+
+The engine exposes this as an indexed view, independent of physical row order:
+
+```javascript
+ctx.data.NR_COUNTRIES.RUS.ECONOMY.treasury += 100;
+ctx.data.NR_COUNTRIES.FRA.MILITARY = { manpower: 42000 };
+ctx.data.NR_COUNTRIES.GER = {
+  CORE: { name: 'Germany' },
+  ECONOMY: { treasury: 700 },
+};
+```
+
+The engine automatically adds `key` to a newly assigned record, uses a blank row for a new record, and a blank column for a new country. Extend the physical named range if it has no room. Duplicate country headers or duplicate `key` values in one country cause an error instead of ambiguous data.
+
+Both `NR_GAME_CORE` and `NR_WORLD` use `COLUMN_MATRICES`: a headed column such as `MAIN` appears as `ctx.data.NR_GAME_CORE.MAIN`, with the same one-column matrix structure as the old named-range data.
+
 ## Province generator
 
-Run `GENERATE_PROVINCES()` to fill every blank cell in `NR_PROVINCES` with a base JSON province and to add missing properties to existing JSON provinces. Existing values are never overwritten, including `0`, `false`, `null`, and nested resource quantities. The schema is editable in `PROVINCE_GENERATOR_CONFIG.defaults`; adding a field there and running the generator again performs a deep, missing-fields-only update.
+Run `GENERATE_PROVINCES()` to fill every blank cell in `NR_WORLD.PROVINCES` with a base JSON province and to add missing properties to existing JSON provinces. Existing values are never overwritten, including `0`, `false`, `null`, and nested resource quantities. The schema is editable in `PROVINCE_GENERATOR_CONFIG.defaults`; adding a field there and running the generator again performs a deep, missing-fields-only update.
 
 The initial schema contains `id`, `name`, `owner`, `terrain`, `elevation`, radiation, pollution, temperature, humidity, area, `soilFertility` (soil quality/yield potential), `fertileLandPercent` (the percentage of province area suitable for agriculture), `resources.water.amount`, and `neighbors`. IDs and names are generated automatically. `prov_1` is the default neighbour for every other province; change `defaultNeighborId` in the generator config to use another anchor province.
 
-The named range should cover exactly the number of province slots required. If it does not exist, the core creates a single-cell `NR_PROVINCES` range; change its configured size before first use when more provinces are needed. A non-blank cell must contain a JSON object; ordinary text and JSON arrays are rejected to avoid silently destroying data.
+The `NR_WORLD` container should have enough data rows for province slots and other world subranges. It starts with one `PROVINCES` data cell; increase its physical row count before first use when more provinces are needed. A non-blank province cell must contain a JSON object; ordinary text and JSON arrays are rejected to avoid silently destroying data.
 
 ## Adding a game system
 
@@ -65,7 +102,7 @@ systems: [
 ],
 ```
 
-Systems run in ascending `priority` order. They only receive `ctx` and should not access `SpreadsheetApp`; all persistence happens once after every system and validator completes successfully. An error means nothing is saved.
+Systems run in ascending `priority` order. They only receive `ctx` and should not access `SpreadsheetApp`; persistence happens after every system and validator completes successfully. Unchanged ranges/containers are not written. On an error, game state is not saved, though a separate diagnostic journal entry is persisted.
 
 ## Journal format and TTL
 
@@ -116,8 +153,8 @@ These entries are also written to the Apps Script execution log. Warning/error T
 
 ## Important rules
 
-- Do not add/remove rows or columns from `ctx.data`; mutate cells and the objects stored in them only.
-- Keep `NR_GAME_META.turn` under engine control. It is increased after a successful pipeline.
+- Do not add/remove rows or columns from ordinary matrices in `ctx.data`; mutate cells and the objects stored in them only. A container may add a record/country only into a physical blank row/column already reserved in its named range.
+- Keep `NR_GAME_CORE.MAIN[0][0].turn` under engine control. It is increased after a successful pipeline.
 - Add game-specific validation functions to `validators`. Returning `false`, an error string, or an array of error strings cancels saving.
 - Use `readOnlyRanges` for rules, UI data, and formula ranges that the engine should be able to read but never overwrite.
 - `PROCESS_TURN` uses a document lock, preventing two simultaneous turn calculations.
