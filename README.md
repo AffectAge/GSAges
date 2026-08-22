@@ -91,6 +91,22 @@ The visibility types currently handled are `PUBLIC`, `COUNTRY`, `COUNTRIES`, `PL
 
 When the journal range is full, its configuration uses `DROP_OLDEST` by default, replacing only the oldest message's cell. Use `overflow: 'THROW'` to abort the whole turn instead.
 
+## System journal and errors
+
+After every successful turn, the engine adds a `SYSTEM` message such as `Ход 4 завершён. Начат ход 5.`. It is public by default and exists for one turn; change its privacy, priority, or TTL in `GAME_ENGINE_CONFIG.systemJournal.turnChange`.
+
+Every uncaught exception from the engine, a registered game system, or any function called by that system aborts the game-state save and is added separately to `NR_JOURNAL`. The error record has `category: 'SYSTEM'`, `priority: 'CRITICAL'`, source-system ID, message, and (by default) a stack trace in `payload`. It is `DEBUG`-only and permanent by default, so a player UI should show it only to a debug/admin viewer.
+
+For non-fatal problems and server-style messages, use the context logger in a game system:
+
+```javascript
+ctx.log.info('Orders have been loaded.', { orders: 12 });
+ctx.log.warn('Province has no owner.', { provinceId: 'moscow' });
+ctx.log.error('Unsupported unit type.', { unitId: 'unit_42' });
+```
+
+These entries are also written to the Apps Script execution log. Warning/error TTL and stack-trace settings are in `GAME_ENGINE_CONFIG.systemJournal.log`.
+
 ## Important rules
 
 - Do not add/remove rows or columns from `ctx.data`; mutate cells and the objects stored in them only.

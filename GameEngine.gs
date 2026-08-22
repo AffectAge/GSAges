@@ -56,6 +56,28 @@ const GAME_ENGINE_CONFIG = {
     overflow: 'DROP_OLDEST', // DROP_OLDEST or THROW
   },
 
+  // System messages are stored in the same NR_JOURNAL range as game messages.
+  // DEBUG visibility keeps stack traces out of ordinary player-facing views.
+  systemJournal: {
+    turnChange: {
+      enabled: true,
+      category: 'SYSTEM',
+      priority: 'NORMAL',
+      visibility: { type: 'PUBLIC', targets: [] },
+      ttlTurns: 1,
+    },
+    log: {
+      enabled: true,
+      category: 'SYSTEM',
+      visibility: { type: 'DEBUG', targets: [] },
+      infoTTLTurns: 1,
+      warningTTLTurns: 3,
+      errorTTLTurns: null,
+      includeStack: true,
+      maxStackLength: 2000,
+    },
+  },
+
   lockTimeoutMs: 30000,
   incrementTurn: true,
 
@@ -99,28 +121,38 @@ const GameEngine = {
   _processTurnUnlocked: function () {
     const startedAt = new Date();
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-    const loaded = NamedRangeStorage.load(spreadsheet, GAME_ENGINE_CONFIG);
-    const context = createTurnContext(loaded.data, startedAt);
+    let context = null;
 
-    // An entry created on turn 50 with ttlTurns: 1 expires when turn 51 starts.
-    context.journal.expireForTurn(context.turn);
-    runTurnSystems(context, GAME_ENGINE_CONFIG.systems);
-    runValidators(context, GAME_ENGINE_CONFIG.validators);
+    try {
+      const loaded = NamedRangeStorage.load(spreadsheet, GAME_ENGINE_CONFIG);
+      context = createTurnContext(loaded.data, startedAt);
 
-    if (GAME_ENGINE_CONFIG.incrementTurn) {
-      context.meta.turn = context.turn + 1;
+      // An entry created on turn 50 with ttlTurns: 1 expires when turn 51 starts.
+      context.journal.expireForTurn(context.turn);
+      runTurnSystems(context, GAME_ENGINE_CONFIG.systems);
+      runValidators(context, GAME_ENGINE_CONFIG.validators);
+
+      if (GAME_ENGINE_CONFIG.incrementTurn) {
+        context.meta.turn = context.turn + 1;
+      }
+      context.meta.lastProcessedAt = new Date().toISOString();
+      emitTurnChangeMessage(context);
+
+      NamedRangeStorage.save(loaded, GAME_ENGINE_CONFIG);
+
+      return {
+        processedTurn: context.turn,
+        nextTurn: context.meta.turn,
+        emittedMessages: context.journal.emittedCount,
+        createdRanges: loaded.createdRanges,
+        durationMs: new Date().getTime() - startedAt.getTime(),
+      };
+    } catch (error) {
+      // Game state is not saved after an error, but the diagnostic is persisted
+      // separately so it is visible in the next run and in a journal UI.
+      SystemJournal.recordFailure(spreadsheet, context, error);
+      throw error;
     }
-    context.meta.lastProcessedAt = new Date().toISOString();
-
-    NamedRangeStorage.save(loaded, GAME_ENGINE_CONFIG);
-
-    return {
-      processedTurn: context.turn,
-      nextTurn: context.meta.turn,
-      emittedMessages: context.journal.emittedCount,
-      createdRanges: loaded.createdRanges,
-      durationMs: new Date().getTime() - startedAt.getTime(),
-    };
   },
 };
 
@@ -280,7 +312,7 @@ function createTurnContext(data, startedAt) {
     throw new Error('NR_GAME_META.turn must be a non-negative integer.');
   }
 
-  return {
+  const context = {
     data: data,
     meta: meta,
     turn: turn,
@@ -289,6 +321,8 @@ function createTurnContext(data, startedAt) {
     helpers: GameHelpers,
     journal: new GameJournal(data[GAME_ENGINE_CONFIG.journalRange], turn, GAME_ENGINE_CONFIG.journal),
   };
+  context.log = new GameLog(context, GAME_ENGINE_CONFIG.systemJournal.log);
+  return context;
 }
 
 function getGameMeta(data) {
@@ -307,6 +341,162 @@ function getGameMeta(data) {
     );
   }
   return meta;
+}
+
+function emitTurnChangeMessage(context) {
+  const settings = GAME_ENGINE_CONFIG.systemJournal.turnChange || {};
+  if (settings.enabled === false) return;
+
+  const previousTurn = context.turn;
+  const nextTurn = context.meta.turn;
+  const changed = previousTurn !== nextTurn;
+  context.journal.emit({
+    category: settings.category || 'SYSTEM',
+    priority: settings.priority || 'NORMAL',
+    visibility: settings.visibility || { type: 'PUBLIC', targets: [] },
+    message: changed
+      ? 'Ход ' + previousTurn + ' завершён. Начат ход ' + nextTurn + '.'
+      : 'Ход ' + previousTurn + ' обработан.',
+    ttlTurns: Object.prototype.hasOwnProperty.call(settings, 'ttlTurns') ? settings.ttlTurns : 1,
+    payload: {
+      type: 'TURN_PROCESSED',
+      previousTurn: previousTurn,
+      nextTurn: nextTurn,
+    },
+  });
+}
+
+/** Use ctx.log inside a system for non-fatal server-console style diagnostics. */
+function GameLog(context, config) {
+  this.context = context;
+  this.config = config || {};
+}
+
+GameLog.prototype.info = function (message, payload) {
+  return this._emit('INFO', message, payload);
+};
+
+GameLog.prototype.warn = function (message, payload) {
+  return this._emit('WARNING', message, payload);
+};
+
+GameLog.prototype.error = function (message, payload) {
+  return this._emit('ERROR', message, payload);
+};
+
+GameLog.prototype._emit = function (level, message, payload) {
+  if (this.config.enabled === false) return null;
+
+  const source = this.context.runtime.currentSystem || 'ENGINE';
+  const ttlByLevel = {
+    INFO: this.config.infoTTLTurns,
+    WARNING: this.config.warningTTLTurns,
+    ERROR: this.config.errorTTLTurns,
+  };
+  const priorityByLevel = { INFO: 'LOW', WARNING: 'HIGH', ERROR: 'CRITICAL' };
+  const text = '[' + level + '][' + source + '] ' + String(message);
+  const ttlTurns = ttlByLevel[level] === undefined ? null : ttlByLevel[level];
+
+  writeServerLog(text);
+  return this.context.journal.emit({
+    category: this.config.category || 'SYSTEM',
+    priority: priorityByLevel[level],
+    visibility: this.config.visibility || { type: 'DEBUG', targets: [] },
+    message: text,
+    ttlTurns: ttlTurns,
+    payload: {
+      type: 'SYSTEM_LOG',
+      level: level,
+      source: source,
+      details: toJournalSafeValue(payload),
+    },
+  });
+};
+
+/** Persists fatal errors without saving partial game-state mutations. */
+const SystemJournal = {
+  recordFailure: function (spreadsheet, context, error) {
+    try {
+      const journalRange = spreadsheet.getRangeByName(GAME_ENGINE_CONFIG.journalRange);
+      if (!journalRange) {
+        writeServerLog('[ERROR][ENGINE] Journal range is unavailable: ' + describeError(error).message);
+        return;
+      }
+
+      const turn = context ? context.turn : this._readCurrentTurn(spreadsheet);
+      const values = journalRange.getValues();
+      const matrix = values.map(function (row) {
+        return row.map(CellCodec.decode);
+      });
+      const journal = new GameJournal(matrix, turn, GAME_ENGINE_CONFIG.journal);
+      const details = describeError(error, GAME_ENGINE_CONFIG.systemJournal.log);
+      const source = context && context.runtime.currentSystem ? context.runtime.currentSystem : 'ENGINE';
+      const logConfig = GAME_ENGINE_CONFIG.systemJournal.log || {};
+      const text = '[ERROR][' + source + '] ' + details.name + ': ' + details.message;
+
+      writeServerLog(text);
+      journal.emit({
+        category: logConfig.category || 'SYSTEM',
+        priority: 'CRITICAL',
+        visibility: logConfig.visibility || { type: 'DEBUG', targets: [] },
+        message: text,
+        ttlTurns: Object.prototype.hasOwnProperty.call(logConfig, 'errorTTLTurns')
+          ? logConfig.errorTTLTurns
+          : null,
+        payload: {
+          type: 'ENGINE_FAILURE',
+          level: 'ERROR',
+          source: source,
+          error: details,
+        },
+      });
+
+      journalRange.setValues(matrix.map(function (row) {
+        return row.map(CellCodec.encode);
+      }));
+    } catch (journalError) {
+      // Never hide the original error behind a diagnostics failure.
+      writeServerLog('[ERROR][ENGINE] Could not save diagnostic: ' + describeError(journalError).message);
+    }
+  },
+
+  _readCurrentTurn: function (spreadsheet) {
+    const metaRange = spreadsheet.getRangeByName(GAME_ENGINE_CONFIG.gameMetaRange);
+    if (!metaRange) return 0;
+    const position = GAME_ENGINE_CONFIG.gameMetaCell;
+    const values = metaRange.getValues();
+    const raw = values[position.row] && values[position.row][position.column];
+    const meta = CellCodec.decode(raw);
+    return meta && Number.isInteger(meta.turn) ? meta.turn : 0;
+  },
+};
+
+function describeError(error, config) {
+  const value = error || new Error('Unknown error');
+  const name = String(value.name || 'Error');
+  const message = String(value.message || value);
+  const includeStack = !config || config.includeStack !== false;
+  const maxStackLength = config && Number.isInteger(config.maxStackLength) ? config.maxStackLength : 2000;
+  const stack = includeStack && value.stack ? String(value.stack).slice(0, maxStackLength) : null;
+  return { name: name, message: message, stack: stack };
+}
+
+function toJournalSafeValue(value) {
+  if (value === undefined) return null;
+  if (value instanceof Error) return describeError(value, GAME_ENGINE_CONFIG.systemJournal.log);
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (error) {
+    return String(value);
+  }
+}
+
+function writeServerLog(message) {
+  if (typeof Logger !== 'undefined' && Logger.log) {
+    Logger.log(message);
+  } else if (typeof console !== 'undefined' && console.log) {
+    console.log(message);
+  }
 }
 
 /**
