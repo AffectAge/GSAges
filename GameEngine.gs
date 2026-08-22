@@ -10,10 +10,10 @@ const GAME_ENGINE_CONFIG = {
   namedRanges: [
     'NR_GAME_META',
     'NR_JOURNAL',
+    'NR_PROVINCES',
     // 'NR_PLAYERS',
     // 'NR_CITIES',
     // 'NR_UNITS',
-    // 'NR_PROVINCES',
     // 'NR_ORDERS',
     // 'NR_RULES',
   ],
@@ -35,6 +35,8 @@ const GAME_ENGINE_CONFIG = {
       initialValues: [[{ turn: 1, status: 'WAITING' }]],
     },
     NR_JOURNAL: { rows: 500, columns: 1 },
+    // Change the size before first use, or define the named range manually.
+    NR_PROVINCES: { rows: 1, columns: 1 },
     // Example when adding a range:
     // NR_PLAYERS: { rows: 100, columns: 1 },
   },
@@ -93,6 +95,38 @@ const GAME_ENGINE_CONFIG = {
   ],
 };
 
+/**
+ * Edit this object to extend the province schema. Missing fields are added on
+ * every generator run; existing values, including 0, false, and null, stay intact.
+ */
+const PROVINCE_GENERATOR_CONFIG = {
+  rangeName: 'NR_PROVINCES',
+  idPrefix: 'prov_',
+  namePrefix: 'Провинция ',
+  // When absent, the first generated province receives this ID. Every other
+  // province receives it as a default neighbour, but never as its own neighbour.
+  defaultNeighborId: 'prov_1',
+  defaults: {
+    owner: null,
+    terrain: 'PLAINS',
+    elevation: 0,
+    radiation: 0,
+    pollution: 0,
+    temperature: 0,
+    humidity: 0,
+    area: 0,
+    // Soil quality/yield potential. This is distinct from fertileLandPercent.
+    soilFertility: 0,
+    fertileLandPercent: 0,
+    resources: {
+      water: { amount: 0 },
+    },
+    neighbors: [],
+    // Future fields may be freely added here, including nested objects:
+    // infrastructure: { roads: 0, railways: 0 },
+  },
+};
+
 /** Public entry point for a button, menu item, or time trigger. */
 function PROCESS_TURN() {
   return GameEngine.processTurn();
@@ -103,7 +137,13 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Game engine')
     .addItem('Process turn', 'PROCESS_TURN')
+    .addItem('Generate province data', 'GENERATE_PROVINCES')
     .addToUi();
+}
+
+/** Public entry point: fills blank/partial cells of NR_PROVINCES with JSON data. */
+function GENERATE_PROVINCES() {
+  return ProvinceGenerator.generate();
 }
 
 const GameEngine = {
@@ -276,6 +316,159 @@ const NamedRangeStorage = {
     return created;
   },
 };
+
+const ProvinceGenerator = {
+  generate: function () {
+    const lock = LockService.getDocumentLock();
+    lock.waitLock(GAME_ENGINE_CONFIG.lockTimeoutMs);
+
+    try {
+      const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+      let range = spreadsheet.getRangeByName(PROVINCE_GENERATOR_CONFIG.rangeName);
+      if (!range) {
+        NamedRangeStorage._createMissingRanges(
+          spreadsheet,
+          [PROVINCE_GENERATOR_CONFIG.rangeName],
+          GAME_ENGINE_CONFIG
+        );
+        range = spreadsheet.getRangeByName(PROVINCE_GENERATOR_CONFIG.rangeName);
+      }
+      if (!range) {
+        throw new Error('Could not create province range ' + PROVINCE_GENERATOR_CONFIG.rangeName + '.');
+      }
+
+      const matrix = range.getValues().map(function (row) {
+        return row.map(CellCodec.decode);
+      });
+      const report = this._fillMissingProvinceData(matrix);
+
+      range.setValues(matrix.map(function (row) {
+        return row.map(CellCodec.encode);
+      }));
+
+      writeServerLog(
+        '[INFO][PROVINCE_GENERATOR] Created: ' + report.created + ', updated: ' + report.updated + '.'
+      );
+      return report;
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  _fillMissingProvinceData: function (matrix) {
+    const config = PROVINCE_GENERATOR_CONFIG;
+    const records = [];
+    const usedIds = Object.create(null);
+
+    GameHelpers.forEachCell(matrix, function (value, row, column) {
+      let province;
+      const wasBlank = value === null || value === undefined;
+      if (wasBlank) {
+        province = {};
+      } else if (isPlainObject(value)) {
+        province = value;
+      } else {
+        throw new Error(
+          config.rangeName + '[' + row + '][' + column + '] must be blank or contain a JSON object.'
+        );
+      }
+
+      if (hasProvinceId(province)) {
+        if (usedIds[province.id]) {
+          throw new Error('Duplicate province id: ' + province.id + '.');
+        }
+        usedIds[province.id] = true;
+      }
+      records.push({ province: province, row: row, column: column, wasBlank: wasBlank });
+    });
+
+    let needsDefaultNeighbor = !usedIds[config.defaultNeighborId];
+    let nextNumber = 1;
+    const getNextId = function () {
+      let candidate;
+      do {
+        candidate = config.idPrefix + nextNumber;
+        nextNumber += 1;
+      } while (usedIds[candidate] || (needsDefaultNeighbor && candidate === config.defaultNeighborId));
+      usedIds[candidate] = true;
+      return candidate;
+    };
+
+    let created = 0;
+    let updated = 0;
+    records.forEach(function (record) {
+      const province = record.province;
+      const before = JSON.stringify(province);
+
+      if (!hasProvinceId(province)) {
+        province.id = needsDefaultNeighbor ? config.defaultNeighborId : getNextId();
+        usedIds[province.id] = true;
+        needsDefaultNeighbor = false;
+      }
+      if (!hasNonEmptyText(province.name)) {
+        province.name = makeProvinceName(province.id, config);
+      }
+
+      fillMissingProperties(province, config.defaults);
+      ensureDefaultNeighbor(province, config.defaultNeighborId);
+
+      if (record.wasBlank) created += 1;
+      else if (JSON.stringify(province) !== before) updated += 1;
+      matrix[record.row][record.column] = province;
+    });
+
+    if (needsDefaultNeighbor) {
+      throw new Error(
+        'Default neighbour ' + config.defaultNeighborId +
+        ' is missing. Add a blank province cell or create that province first.'
+      );
+    }
+
+    return { created: created, updated: updated, total: records.length };
+  },
+};
+
+function hasProvinceId(province) {
+  return typeof province.id === 'string' && province.id.trim() !== '';
+}
+
+function hasNonEmptyText(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function makeProvinceName(id, config) {
+  const suffix = id.indexOf(config.idPrefix) === 0 ? id.slice(config.idPrefix.length) : id;
+  return config.namePrefix + suffix;
+}
+
+function ensureDefaultNeighbor(province, defaultNeighborId) {
+  if (!Array.isArray(province.neighbors)) {
+    throw new Error('Province ' + province.id + ' has a non-array neighbors field.');
+  }
+  if (province.id !== defaultNeighborId && province.neighbors.indexOf(defaultNeighborId) === -1) {
+    province.neighbors.push(defaultNeighborId);
+  }
+}
+
+function fillMissingProperties(target, defaults) {
+  Object.keys(defaults).forEach(function (key) {
+    const defaultValue = defaults[key];
+    if (!Object.prototype.hasOwnProperty.call(target, key) || target[key] === undefined) {
+      target[key] = cloneJsonValue(defaultValue);
+    } else if (isPlainObject(target[key]) && isPlainObject(defaultValue)) {
+      fillMissingProperties(target[key], defaultValue);
+    }
+  });
+  return target;
+}
+
+function cloneJsonValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date);
+}
 
 /** Converts only JSON objects/arrays. Text such as "Russia" remains plain text. */
 const CellCodec = {
@@ -524,11 +717,8 @@ GameJournal.prototype.emit = function (input) {
 
   const ttlTurns = this._resolveTTL(input);
   const slot = this._findEmptySlot() || this._resolveOverflowSlot();
-  const createdAt = new Date().toISOString();
   const entry = {
-    id: input.id || ('msg_' + this.currentTurn + '_' + Utilities.getUuid()),
     createdTurn: this.currentTurn,
-    createdAt: createdAt,
     country: input.country || null,
     category: String(input.category || 'GENERAL').toUpperCase(),
     priority: String(input.priority || 'NORMAL').toUpperCase(),
@@ -538,15 +728,24 @@ GameJournal.prototype.emit = function (input) {
     expiresAtTurn: ttlTurns === null ? null : this.currentTurn + ttlTurns,
   };
 
+  // Temporary records do not need an ID. A permanent record gets a compact ID
+  // only when it should later be addressable through journal.remove(id).
+  if (typeof input.id === 'string' && input.id) {
+    entry.id = input.id;
+  } else if (ttlTurns === null && input.removable !== false) {
+    entry.id = this._makeCompactId(slot);
+  }
+
   // Optional structured details for a UI, without prescribing a game schema.
   if (input.payload !== undefined) entry.payload = input.payload;
 
   this.matrix[slot.row][slot.column] = entry;
   this.emittedCount += 1;
-  return entry.id;
+  return entry.id || null;
 };
 
 GameJournal.prototype.remove = function (messageId) {
+  if (typeof messageId !== 'string' || !messageId) return false;
   const slot = this._findById(messageId);
   if (!slot) return false;
   this.matrix[slot.row][slot.column] = null;
@@ -627,11 +826,20 @@ GameJournal.prototype._findById = function (messageId) {
   return found;
 };
 
+GameJournal.prototype._makeCompactId = function (slot) {
+  let flatIndex = 0;
+  for (let row = 0; row < slot.row; row += 1) {
+    flatIndex += this.matrix[row].length;
+  }
+  flatIndex += slot.column + 1;
+  return 'm' + this.currentTurn + '_' + flatIndex;
+};
+
 GameJournal.prototype._eachEntry = function (callback) {
   for (let row = 0; row < this.matrix.length; row += 1) {
     for (let column = 0; column < this.matrix[row].length; column += 1) {
       const value = this.matrix[row][column];
-      if (value && typeof value === 'object' && !Array.isArray(value) && value.id) {
+      if (isJournalEntry(value)) {
         callback(value, row, column);
       }
     }
@@ -641,8 +849,14 @@ GameJournal.prototype._eachEntry = function (callback) {
 function compareJournalAge(left, right) {
   const leftTurn = Number.isInteger(left.createdTurn) ? left.createdTurn : Number.MAX_SAFE_INTEGER;
   const rightTurn = Number.isInteger(right.createdTurn) ? right.createdTurn : Number.MAX_SAFE_INTEGER;
-  if (leftTurn !== rightTurn) return leftTurn - rightTurn;
-  return String(left.createdAt || '').localeCompare(String(right.createdAt || ''));
+  return leftTurn - rightTurn;
+}
+
+function isJournalEntry(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  // `id` keeps old journal records compatible; new temporary messages have no ID.
+  return Boolean(value.id) ||
+    (typeof value.message === 'string' && Number.isInteger(value.createdTurn));
 }
 
 function isEntryVisibleTo(entry, viewer) {

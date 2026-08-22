@@ -29,6 +29,14 @@ Blank cells become `null`. JSON objects and arrays are decoded automatically; no
 
 The engine currently reads values, not formula definitions. Do not place formulas in a writable engine range. Put calculated/formula ranges in `readOnlyRanges` instead.
 
+## Province generator
+
+Run `GENERATE_PROVINCES()` to fill every blank cell in `NR_PROVINCES` with a base JSON province and to add missing properties to existing JSON provinces. Existing values are never overwritten, including `0`, `false`, `null`, and nested resource quantities. The schema is editable in `PROVINCE_GENERATOR_CONFIG.defaults`; adding a field there and running the generator again performs a deep, missing-fields-only update.
+
+The initial schema contains `id`, `name`, `owner`, `terrain`, `elevation`, radiation, pollution, temperature, humidity, area, `soilFertility` (soil quality/yield potential), `fertileLandPercent` (the percentage of province area suitable for agriculture), `resources.water.amount`, and `neighbors`. IDs and names are generated automatically. `prov_1` is the default neighbour for every other province; change `defaultNeighborId` in the generator config to use another anchor province.
+
+The named range should cover exactly the number of province slots required. If it does not exist, the core creates a single-cell `NR_PROVINCES` range; change its configured size before first use when more provinces are needed. A non-blank cell must contain a JSON object; ordinary text and JSON arrays are rejected to avoid silently destroying data.
+
 ## Adding a game system
 
 ```javascript
@@ -61,11 +69,10 @@ Systems run in ascending `priority` order. They only receive `ctx` and should no
 
 ## Journal format and TTL
 
-One `NR_JOURNAL` cell stores one JSON message. `journal.emit()` adds `id`, `createdTurn`, `createdAt`, and `expiresAtTurn` automatically. The entry above becomes approximately:
+One `NR_JOURNAL` cell stores one JSON message. A temporary message stores only game-relevant data: `createdTurn` and `expiresAtTurn` are added automatically, while `id` and real-time timestamps are omitted.
 
 ```json
 {
-  "id":"msg_1_...",
   "createdTurn":1,
   "country":"RUS",
   "category":"ECONOMY",
@@ -77,7 +84,7 @@ One `NR_JOURNAL` cell stores one JSON message. `journal.emit()` adds `id`, `crea
 }
 ```
 
-`ttlTurns: 1` exists during its creation turn and is cleared at the beginning of the next turn. Use `ttlTurns: 3` for three turns, or `ttlTurns: null` for a permanent entry. Remove a permanent entry later with `ctx.journal.remove(messageId)`.
+`ttlTurns: 1` exists during its creation turn and is cleared at the beginning of the next turn. Use `ttlTurns: 3` for three turns, or `ttlTurns: null` for a permanent entry. A permanent message gets a short ID such as `m28_3` by default, so it can be removed later with `ctx.journal.remove(messageId)`. Pass `removable: false` to a permanent message to omit its ID as well.
 
 Supported viewer filtering helper:
 
