@@ -55,14 +55,14 @@ const FactorySystem = {
     const templateId = this._isText(payload.templateId) ? payload.templateId.trim() : null;
     const provinceId = this._isText(payload.provinceId) ? payload.provinceId.trim() : null;
     const level = payload.level === undefined ? 1 : payload.level;
-    if (!templateId) return 'Не указан templateId фабрики.';
-    if (!provinceId) return 'Не указана provinceId для строительства.';
+    if (!templateId) return 'В приказе не выбран тип фабрики.';
+    if (!provinceId) return 'В приказе не указана провинция для строительства.';
     if (!this._isFiniteNumber(level) || !Number.isInteger(level) || level < 1) {
       return 'Уровень фабрики должен быть целым числом не меньше 1.';
     }
 
     const templates = this._indexTemplates(ctx);
-    if (!templates[templateId]) return 'Шаблон фабрики «' + templateId + '» не найден.';
+    if (!templates[templateId]) return 'Указанный тип фабрики «' + templateId + '» не утверждён.';
 
     const provinces = this._indexProvinces(ctx);
     const province = provinces[provinceId];
@@ -72,10 +72,10 @@ const FactorySystem = {
     }
 
     const factories = this._getSubrange(ctx, FACTORY_SYSTEM_CONFIG.factoriesRange, FACTORY_SYSTEM_CONFIG.factoriesSubrange);
-    if (!factories || !this._findFirstEmptyCell(factories)) return 'Нет свободного места в контейнере фабрик.';
+    if (!factories || !this._findFirstEmptyCell(factories)) return 'Реестр фабрик заполнен; новое предприятие пока нельзя зарегистрировать.';
     const factoryId = this._factoryIdForOrder(order);
     if (this._containsId(factories, factoryId)) {
-      return 'Фабрика для приказа «' + order.id + '» уже существует.';
+      return 'Предприятие по этому приказу уже зарегистрировано.';
     }
     return { ok: true };
   },
@@ -83,7 +83,7 @@ const FactorySystem = {
   executeBuildFactoryOrder: function (ctx, order) {
     const factories = this._getSubrange(ctx, FACTORY_SYSTEM_CONFIG.factoriesRange, FACTORY_SYSTEM_CONFIG.factoriesSubrange);
     const target = factories && this._findFirstEmptyCell(factories);
-    if (!target) return { ok: false, message: 'Нет свободного места в контейнере фабрик.' };
+    if (!target) return { ok: false, message: 'Реестр фабрик заполнен; новое предприятие пока нельзя зарегистрировать.' };
 
     const payload = order.payload;
     const template = this._indexTemplates(ctx)[payload.templateId];
@@ -103,7 +103,8 @@ const FactorySystem = {
     };
     return {
       ok: true,
-      message: 'Строительство фабрики «' + factoryId + '» начато. Срок: ' + constructionTurns + ' ход(а).',
+      message: 'Возведение предприятия «' + (template.name || template.id) + '» в провинции «' +
+        payload.provinceId + '» начато. Ожидаемый срок — ' + constructionTurns + ' ход(а).',
     };
   },
 
@@ -120,7 +121,7 @@ const FactorySystem = {
     ctx.helpers.forEachCell(factories, function (factory, row, column) {
       if (factory === null || factory === undefined) return;
       if (!FactorySystem._isObject(factory)) {
-        ctx.log.error('Factory cell contains a non-JSON value.', { row: row, column: column });
+        ctx.log.error('В реестре фабрик обнаружена повреждённая запись.', { row: row, column: column });
         return;
       }
 
@@ -223,7 +224,7 @@ const FactorySystem = {
 
   _processFactory: function (ctx, factory, templates, provinces, report, row, column) {
     if (!this._isText(factory.id)) {
-      ctx.log.error('Factory has no id.', { row: row, column: column });
+      ctx.log.error('В реестре фабрик обнаружена запись без идентификатора.', { row: row, column: column });
       return;
     }
     this._ensureFactoryDefaults(factory);
@@ -232,7 +233,7 @@ const FactorySystem = {
         ctx,
         factory,
         'TEMPLATE_MISSING',
-        'Для фабрики «' + factory.id + '» не выбран шаблон.',
+        'Предприятие в реестре не имеет утверждённого типа и временно остановлено.',
         'TEMPLATE'
       );
       return;
@@ -244,7 +245,7 @@ const FactorySystem = {
         ctx,
         factory,
         'TEMPLATE_MISSING',
-        'Фабрика «' + factory.id + '» остановлена: шаблон «' + factory.templateId + '» не найден.',
+        'Предприятие временно остановлено: его тип «' + factory.templateId + '» не утверждён.',
         'TEMPLATE'
       );
       return;
@@ -271,7 +272,7 @@ const FactorySystem = {
         ctx,
         factory,
         'INPUT_SHORTAGE',
-        'Фабрика «' + factory.id + '» остановлена: на её складе не хватает сырья.',
+        'Предприятие временно остановлено: на его складе не хватает сырья.',
         'INPUTS'
       );
       factory.lastProduction = { turn: ctx.turn, cycles: 0, outputs: {} };
@@ -302,7 +303,7 @@ const FactorySystem = {
     factory.constructionTurnsRemaining = 0;
     factory.status = 'ACTIVE';
     factory.operationalStatus = 'RUNNING';
-    this._emit(ctx, factory, 'SUCCESS', 'Строительство фабрики «' + factory.id + '» завершено.', 2, 'CONSTRUCTION');
+    this._emit(ctx, factory, 'SUCCESS', 'Строительство предприятия в провинции «' + factory.provinceId + '» завершено.', 2, 'CONSTRUCTION');
   },
 
   _calculateCycles: function (factory, template) {
@@ -346,7 +347,7 @@ const FactorySystem = {
         ctx,
         factory,
         'PROVINCE_MISSING',
-        'Фабрика «' + factory.id + '» не может работать: провинция «' + factory.provinceId + '» не найдена.',
+        'Предприятие не может работать: указанная провинция «' + factory.provinceId + '» не найдена.',
         'PROVINCE'
       );
       return false;

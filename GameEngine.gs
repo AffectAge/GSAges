@@ -112,6 +112,8 @@ const GAME_ENGINE_CONFIG = {
   gameMetaSubrange: 'MAIN',
   // Zero-based position of an object such as {"turn": 45, "status": "WAITING"}.
   gameMetaCell: { row: 0, column: 0 },
+  // A checkbox in this separate MAIN cell requests one turn from a phone.
+  mobileTurnRequestCell: { row: 1, column: 0 },
 
   // One row of this table holds one player-readable journal entry.
   journalRange: 'NR_JOURNAL',
@@ -197,11 +199,23 @@ function PROCESS_TURN() {
   return GameEngine.processTurn();
 }
 
+/** Run once by the owner to enable the mobile checkbox. */
+function INSTALL_MOBILE_TURN_TRIGGER() {
+  return GameEngine.installMobileTurnTrigger();
+}
+
+/** Installable on-edit trigger; it processes a turn only if the checkbox is TRUE. */
+function PROCESS_TURN_FROM_MOBILE_REQUEST(event) {
+  const spreadsheet = event && event.source ? event.source : SpreadsheetApp.getActiveSpreadsheet();
+  return GameEngine.processMobileTurnRequest(spreadsheet);
+}
+
 /** Optional menu for a spreadsheet-bound Apps Script project. */
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Game engine')
     .addItem('Process turn', 'PROCESS_TURN')
+    .addItem('Enable mobile turn button', 'INSTALL_MOBILE_TURN_TRIGGER')
     .addItem('Create country order containers', 'INITIALIZE_COUNTRY_ORDER_BOOKS')
     .addItem('Generate province data', 'GENERATE_PROVINCES')
     .addToUi();
@@ -239,6 +253,49 @@ const GameEngine = {
     }
   },
 
+  /** Installs the owner-authorized edit trigger and creates the FALSE checkbox. */
+  installMobileTurnTrigger: function () {
+    const lock = LockService.getDocumentLock();
+    lock.waitLock(GAME_ENGINE_CONFIG.lockTimeoutMs);
+
+    try {
+      const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+      this._prepareMobileTurnControl(spreadsheet);
+      ScriptApp.getProjectTriggers().forEach(function (trigger) {
+        if (trigger.getHandlerFunction() === 'PROCESS_TURN_FROM_MOBILE_REQUEST') {
+          ScriptApp.deleteTrigger(trigger);
+        }
+      });
+      ScriptApp.newTrigger('PROCESS_TURN_FROM_MOBILE_REQUEST')
+        .forSpreadsheet(spreadsheet)
+        .onEdit()
+        .create();
+      return { installed: true, requestCell: 'NR_GAME_CORE.MAIN[1][0]' };
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /** Runs a turn only when the mobile checkbox currently contains TRUE. */
+  processMobileTurnRequest: function (spreadsheet) {
+    const lock = LockService.getDocumentLock();
+    lock.waitLock(GAME_ENGINE_CONFIG.lockTimeoutMs);
+
+    try {
+      const loaded = NamedRangeStorage.load(
+        spreadsheet,
+        GAME_ENGINE_CONFIG,
+        [GAME_ENGINE_CONFIG.gameMetaRange]
+      );
+      if (!this._isMobileTurnRequested(loaded.data)) {
+        return { processed: false, reason: 'NO_REQUEST' };
+      }
+      return this._processTurnUnlocked(spreadsheet);
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
   /** Creates country outboxes without advancing a turn. */
   initializeCountryOrderBooks: function () {
     const lock = LockService.getDocumentLock();
@@ -255,9 +312,9 @@ const GameEngine = {
     }
   },
 
-  _processTurnUnlocked: function () {
+  _processTurnUnlocked: function (providedSpreadsheet) {
     const startedAt = new Date();
-    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = providedSpreadsheet || SpreadsheetApp.getActiveSpreadsheet();
     let context = null;
 
     try {
@@ -277,14 +334,26 @@ const GameEngine = {
       }
       context.meta.lastProcessedAt = new Date().toISOString();
       emitTurnChangeMessage(context);
+      this._clearMobileTurnRequest(context.data);
 
       NamedRangeStorage.save(loaded, GAME_ENGINE_CONFIG);
+      let acknowledgementReport = null;
+      if (typeof CountryOrderGateway !== 'undefined') {
+        try {
+          acknowledgementReport = CountryOrderGateway.acknowledgeImportedOrders(context);
+        } catch (error) {
+          // Central state is already saved. Keep source orders untouched and
+          // rely on idempotent import during the following turn.
+          writeServerLog('[WARNING][ORDERS_ACK] ' + String(error.message || error));
+        }
+      }
 
       return {
         processedTurn: context.turn,
         nextTurn: context.meta.turn,
         emittedMessages: context.journal.emittedCount,
         createdRanges: loaded.createdRanges,
+        acknowledgedCountryOrders: acknowledgementReport ? acknowledgementReport.removed : 0,
         durationMs: new Date().getTime() - startedAt.getTime(),
       };
     } catch (error) {
@@ -292,6 +361,63 @@ const GameEngine = {
       // separately so it is visible in the next run and in a journal UI.
       SystemJournal.recordFailure(spreadsheet, context, error);
       throw error;
+    }
+  },
+
+  _prepareMobileTurnControl: function (spreadsheet) {
+    const loaded = NamedRangeStorage.load(
+      spreadsheet,
+      GAME_ENGINE_CONFIG,
+      [GAME_ENGINE_CONFIG.gameMetaRange]
+    );
+    this._ensureMobileTurnControl(loaded.data);
+    NamedRangeStorage.save(loaded, GAME_ENGINE_CONFIG);
+    this._formatMobileTurnCheckbox(spreadsheet);
+  },
+
+  _getMobileTurnControl: function (data) {
+    const container = data[GAME_ENGINE_CONFIG.gameMetaRange];
+    const main = container && container[GAME_ENGINE_CONFIG.gameMetaSubrange];
+    const position = GAME_ENGINE_CONFIG.mobileTurnRequestCell;
+    if (!main || !main[position.row] || main[position.row][position.column] === undefined) {
+      throw new Error('Ячейка мобильного запроса находится за пределами NR_GAME_CORE.MAIN.');
+    }
+    return main[position.row][position.column];
+  },
+
+  _ensureMobileTurnControl: function (data) {
+    const value = this._getMobileTurnControl(data);
+    if (value === null || value === undefined || value === '') {
+      const main = data[GAME_ENGINE_CONFIG.gameMetaRange][GAME_ENGINE_CONFIG.gameMetaSubrange];
+      const position = GAME_ENGINE_CONFIG.mobileTurnRequestCell;
+      main[position.row][position.column] = false;
+    }
+  },
+
+  _isMobileTurnRequested: function (data) {
+    const value = this._getMobileTurnControl(data);
+    return value === true || (typeof value === 'string' && value.trim().toUpperCase() === 'TRUE');
+  },
+
+  _clearMobileTurnRequest: function (data) {
+    this._ensureMobileTurnControl(data);
+    const main = data[GAME_ENGINE_CONFIG.gameMetaRange][GAME_ENGINE_CONFIG.gameMetaSubrange];
+    const position = GAME_ENGINE_CONFIG.mobileTurnRequestCell;
+    main[position.row][position.column] = false;
+  },
+
+  _formatMobileTurnCheckbox: function (spreadsheet) {
+    const range = spreadsheet.getRangeByName(GAME_ENGINE_CONFIG.gameMetaRange);
+    const position = GAME_ENGINE_CONFIG.mobileTurnRequestCell;
+    const definition = GAME_ENGINE_CONFIG.containers[GAME_ENGINE_CONFIG.gameMetaRange];
+    if (!range || !definition) return;
+    const cell = range.getCell(
+      Number(definition.dataStartRow) + position.row + 1,
+      position.column + 1
+    );
+    if (cell && typeof cell.insertCheckboxes === 'function') cell.insertCheckboxes();
+    if (cell && typeof cell.setNote === 'function') {
+      cell.setNote('Нажмите флажок, чтобы запросить обработку одного игрового хода.');
     }
   },
 };
@@ -708,6 +834,7 @@ function createGameCoreInitialValues(rows, columns) {
   const matrix = createBlankMatrix(rows, columns);
   matrix[0][0] = 'MAIN';
   matrix[1][0] = { turn: 1, status: 'WAITING' };
+  if (rows > 2) matrix[2][0] = false;
   if (columns > 1) {
     matrix[0][1] = 'FACTORY_TEMPLATES';
     matrix[1][1] = createDefaultFactoryTemplate();
@@ -936,7 +1063,7 @@ const CellCodec = {
   },
 };
 
-const JOURNAL_COLUMNS = [
+const JOURNAL_COLUMN_FIELDS = [
   'TURN',
   'CATEGORY',
   'SUBCATEGORY',
@@ -948,10 +1075,59 @@ const JOURNAL_COLUMNS = [
   'ID',
 ];
 
-const JOURNAL_COLUMN_INDEX = JOURNAL_COLUMNS.reduce(function (index, header, column) {
-  index[header] = column;
+const JOURNAL_COLUMNS = [
+  'ХОД',
+  'ВЕДОМСТВО',
+  'ТЕМА',
+  'СТРАНА',
+  'ВАЖНОСТЬ',
+  'ДОСТУП',
+  'СРОК (ХОДОВ)',
+  'СВОДКА',
+  'ИД',
+];
+
+const JOURNAL_COLUMN_INDEX = JOURNAL_COLUMN_FIELDS.reduce(function (index, field, column) {
+  index[field] = column;
   return index;
 }, Object.create(null));
+
+const JOURNAL_CATEGORY_LABELS = {
+  GENERAL: 'Совет министров',
+  SYSTEM: 'Канцелярия правительства',
+  ORDERS: 'Государственная канцелярия',
+  CONSTRUCTION: 'Министерство строительства',
+  INDUSTRY: 'Министерство промышленности',
+  ECONOMY: 'Министерство финансов',
+  MILITARY: 'Военное министерство',
+  DIPLOMACY: 'Министерство иностранных дел',
+  PROVINCE: 'Министерство территорий',
+};
+
+const JOURNAL_SUBCATEGORY_LABELS = {
+  GENERAL: 'Общая сводка',
+  TURN: 'Ход государства',
+  ORDERS: 'Приказы',
+  IMPORT: 'Приём приказов',
+  VALIDATION: 'Проверка приказов',
+  BUILD_FACTORY: 'Строительство фабрик',
+  CONSTRUCTION: 'Строительство',
+  FACTORY: 'Фабрики',
+  TEMPLATE: 'Типы фабрик',
+  INPUTS: 'Снабжение',
+  PROVINCE: 'Территории',
+  FACTORIES: 'Фабрики',
+  ENGINE: 'Работа движка',
+};
+
+const JOURNAL_PRIORITY_LABELS = {
+  LOW: 'Сведения',
+  NORMAL: 'Сведения',
+  SUCCESS: 'Хорошие новости',
+  HIGH: 'Требует внимания',
+  CRITICAL: 'Срочно',
+  ERROR: 'Срочно',
+};
 
 /** Physical player-facing table stored directly in NR_JOURNAL. */
 const JournalTableStorage = {
@@ -969,6 +1145,9 @@ const JournalTableStorage = {
       return row.map(CellCodec.decode);
     });
     const isTable = this.hasHeaders(source);
+    if (!isTable) {
+      throw new Error('NR_JOURNAL должен использовать текущие русские заголовки журнала.');
+    }
     const definition = config.rangeDefaults[name] || {};
     const requiredRows = Math.max(
       Number(definition.rows) || 2,
@@ -977,28 +1156,16 @@ const JournalTableStorage = {
     );
     const requiredColumns = JOURNAL_COLUMNS.length;
     const shapeIsCurrent = range.getNumRows() === requiredRows && range.getNumColumns() === requiredColumns;
-    if (isTable && shapeIsCurrent) {
+    if (shapeIsCurrent) {
       this._markSchemaReady();
       return range;
     }
 
     const table = this.createEmptyTable(requiredRows);
-    if (isTable) {
-      for (let row = 1; row < Math.min(source.length, table.length); row += 1) {
-        for (let column = 0; column < Math.min(source[row].length, JOURNAL_COLUMNS.length); column += 1) {
-          table[row][column] = source[row][column];
-        }
+    for (let row = 1; row < Math.min(source.length, table.length); row += 1) {
+      for (let column = 0; column < Math.min(source[row].length, JOURNAL_COLUMNS.length); column += 1) {
+        table[row][column] = source[row][column];
       }
-    } else {
-      let destinationRow = 1;
-      source.forEach(function (sourceRow) {
-        sourceRow.forEach(function (value) {
-          const legacy = JournalTableStorage.readLegacyEntry(value);
-          if (!legacy || destinationRow >= table.length) return;
-          JournalTableStorage.writeEntry(table, destinationRow, legacy);
-          destinationRow += 1;
-        });
-      });
     }
 
     const sheet = range.getSheet();
@@ -1020,7 +1187,7 @@ const JournalTableStorage = {
   _isSchemaReady: function () {
     if (typeof PropertiesService === 'undefined') return false;
     try {
-      return PropertiesService.getDocumentProperties().getProperty('GAME_ENGINE_JOURNAL_TABLE_V1') === '1';
+      return PropertiesService.getDocumentProperties().getProperty('GAME_ENGINE_JOURNAL_TABLE') === '1';
     } catch (error) {
       return false;
     }
@@ -1029,7 +1196,7 @@ const JournalTableStorage = {
   _markSchemaReady: function () {
     if (typeof PropertiesService === 'undefined') return;
     try {
-      PropertiesService.getDocumentProperties().setProperty('GAME_ENGINE_JOURNAL_TABLE_V1', '1');
+      PropertiesService.getDocumentProperties().setProperty('GAME_ENGINE_JOURNAL_TABLE', '1');
     } catch (error) {
       // The table still works if document properties are unavailable.
     }
@@ -1057,23 +1224,6 @@ const JournalTableStorage = {
     return Array(JOURNAL_COLUMNS.length).fill(null);
   },
 
-  readLegacyEntry: function (value) {
-    if (!isPlainObject(value) || typeof value.message !== 'string' || !Number.isInteger(value.createdTurn)) {
-      return null;
-    }
-    return {
-      createdTurn: value.createdTurn,
-      category: value.category,
-      subCategory: value.subCategory || value.subcategory,
-      country: value.country,
-      priority: value.priority,
-      visibility: value.visibility,
-      ttlTurns: value.ttlTurns,
-      message: value.message,
-      id: value.id,
-    };
-  },
-
   readEntry: function (row) {
     if (!Array.isArray(row)) return null;
     const turn = Number(row[JOURNAL_COLUMN_INDEX.TURN]);
@@ -1083,10 +1233,10 @@ const JournalTableStorage = {
     const ttlTurns = this.readTTL(row[JOURNAL_COLUMN_INDEX.TTL_TURNS]);
     return {
       createdTurn: turn,
-      category: this.readText(row[JOURNAL_COLUMN_INDEX.CATEGORY]) || 'GENERAL',
-      subCategory: this.readText(row[JOURNAL_COLUMN_INDEX.SUBCATEGORY]) || 'GENERAL',
+      category: this.readCategory(row[JOURNAL_COLUMN_INDEX.CATEGORY]),
+      subCategory: this.readSubCategory(row[JOURNAL_COLUMN_INDEX.SUBCATEGORY]),
       country: this.readText(row[JOURNAL_COLUMN_INDEX.COUNTRY]),
-      priority: this.readText(row[JOURNAL_COLUMN_INDEX.PRIORITY]) || 'NORMAL',
+      priority: this.readPriority(row[JOURNAL_COLUMN_INDEX.PRIORITY]),
       visibility: this.readVisibility(row[JOURNAL_COLUMN_INDEX.VISIBILITY]),
       ttlTurns: ttlTurns,
       expiresAtTurn: ttlTurns === null ? null : turn + ttlTurns,
@@ -1095,18 +1245,21 @@ const JournalTableStorage = {
     };
   },
 
-  writeEntry: function (matrix, row, entry) {
+  writeEntry: function (matrix, row, entry, options) {
     const values = this.createEmptyEntryRow();
     const category = this.normalizeKey(entry.category || 'GENERAL');
+    const subCategory = this.normalizeKey(entry.subCategory || entry.subcategory || 'GENERAL');
     const priority = this.normalizeKey(entry.priority || 'NORMAL');
     values[JOURNAL_COLUMN_INDEX.TURN] = entry.createdTurn;
-    values[JOURNAL_COLUMN_INDEX.CATEGORY] = category;
-    values[JOURNAL_COLUMN_INDEX.SUBCATEGORY] = this.normalizeKey(entry.subCategory || entry.subcategory || 'GENERAL');
+    values[JOURNAL_COLUMN_INDEX.CATEGORY] = this.writeCategory(category);
+    values[JOURNAL_COLUMN_INDEX.SUBCATEGORY] = this.writeSubCategory(subCategory);
     values[JOURNAL_COLUMN_INDEX.COUNTRY] = entry.country || null;
-    values[JOURNAL_COLUMN_INDEX.PRIORITY] = priority;
+    values[JOURNAL_COLUMN_INDEX.PRIORITY] = this.writePriority(priority);
     values[JOURNAL_COLUMN_INDEX.VISIBILITY] = this.writeVisibility(entry.visibility);
-    values[JOURNAL_COLUMN_INDEX.TTL_TURNS] = entry.ttlTurns;
-    values[JOURNAL_COLUMN_INDEX.MESSAGE] = this.decorateMessage(entry.message, category, priority);
+    values[JOURNAL_COLUMN_INDEX.TTL_TURNS] = entry.ttlTurns === null ? 'Постоянно' : entry.ttlTurns;
+    values[JOURNAL_COLUMN_INDEX.MESSAGE] = options && options.alreadyDecorated
+      ? entry.message
+      : this.decorateMessage(entry.message, category, priority);
     values[JOURNAL_COLUMN_INDEX.ID] = entry.id || null;
     matrix[row] = values;
   },
@@ -1116,7 +1269,7 @@ const JournalTableStorage = {
   },
 
   readTTL: function (value) {
-    if (value === null || value === undefined || value === '' || value === '∞') return null;
+    if (value === null || value === undefined || value === '' || value === '∞' || value === 'Постоянно') return null;
     const ttl = Number(value);
     return Number.isInteger(ttl) && ttl > 0 ? ttl : null;
   },
@@ -1129,15 +1282,61 @@ const JournalTableStorage = {
     return String(value || 'GENERAL').trim().toUpperCase();
   },
 
+  readCategory: function (value) {
+    return this._readLabel(value, JOURNAL_CATEGORY_LABELS, 'GENERAL');
+  },
+
+  writeCategory: function (value) {
+    return JOURNAL_CATEGORY_LABELS[this.normalizeKey(value)] || 'Совет министров';
+  },
+
+  readSubCategory: function (value) {
+    return this._readLabel(value, JOURNAL_SUBCATEGORY_LABELS, 'GENERAL');
+  },
+
+  writeSubCategory: function (value) {
+    return JOURNAL_SUBCATEGORY_LABELS[this.normalizeKey(value)] || 'Общая сводка';
+  },
+
+  readPriority: function (value) {
+    return this._readLabel(value, JOURNAL_PRIORITY_LABELS, 'NORMAL');
+  },
+
+  writePriority: function (value) {
+    return JOURNAL_PRIORITY_LABELS[this.normalizeKey(value)] || JOURNAL_PRIORITY_LABELS.NORMAL;
+  },
+
+  _readLabel: function (value, labels, fallback) {
+    const normalized = this.normalizeKey(value || fallback);
+    if (labels[normalized]) return normalized;
+    const keys = Object.keys(labels);
+    for (let index = 0; index < keys.length; index += 1) {
+      if (this.normalizeKey(labels[keys[index]]) === normalized) return keys[index];
+    }
+    return fallback;
+  },
+
   writeVisibility: function (value) {
     const visibility = value || { type: 'PUBLIC', targets: [] };
     const type = this.normalizeKey(visibility.type || 'PUBLIC');
     const targets = Array.isArray(visibility.targets) ? visibility.targets.map(String).filter(Boolean) : [];
-    return targets.length ? type + ':' + targets.join('|') : type;
+    if (type === 'PUBLIC') return 'Всем';
+    if (type === 'COUNTRY' || type === 'COUNTRIES') return 'Странам: ' + targets.join(', ');
+    if (type === 'PLAYER' || type === 'PLAYERS') return 'Игрокам: ' + targets.join(', ');
+    if (type === 'DEBUG') return 'Администрации';
+    return 'Служебный доступ';
   },
 
   readVisibility: function (value) {
     const text = this.readText(value) || 'PUBLIC';
+    if (text === 'Всем') return { type: 'PUBLIC', targets: [] };
+    if (text === 'Администрации') return { type: 'DEBUG', targets: [] };
+    if (text.indexOf('Странам:') === 0) {
+      return { type: 'COUNTRIES', targets: this._readVisibilityTargets(text.slice('Странам:'.length)) };
+    }
+    if (text.indexOf('Игрокам:') === 0) {
+      return { type: 'PLAYERS', targets: this._readVisibilityTargets(text.slice('Игрокам:'.length)) };
+    }
     const splitAt = text.indexOf(':');
     const type = splitAt === -1 ? text : text.slice(0, splitAt);
     const rawTargets = splitAt === -1 ? '' : text.slice(splitAt + 1);
@@ -1145,6 +1344,12 @@ const JournalTableStorage = {
       type: this.normalizeKey(type),
       targets: rawTargets ? rawTargets.split('|').map(String).filter(Boolean) : [],
     };
+  },
+
+  _readVisibilityTargets: function (value) {
+    return String(value || '').split(',').map(function (target) {
+      return target.trim();
+    }).filter(Boolean);
   },
 
   decorateMessage: function (message, category, priority) {
@@ -1164,7 +1369,15 @@ const JournalTableStorage = {
       CRITICAL: '⛔',
       ERROR: '⛔',
     }[priority];
-    return categoryEmoji + (priorityEmoji ? ' ' + priorityEmoji : '') + ' ' + String(message).trim();
+    const lead = {
+      SUCCESS: 'Докладываем:',
+      HIGH: 'Требуется внимание:',
+      CRITICAL: 'Срочная сводка:',
+      ERROR: 'Срочная сводка:',
+      NORMAL: 'Сводка:',
+      LOW: 'Сведения:',
+    }[priority] || 'Сводка:';
+    return categoryEmoji + (priorityEmoji ? ' ' + priorityEmoji : '') + ' ' + lead + ' ' + String(message).trim();
   },
 
   applyMessageColors: function (range, matrix) {
@@ -1172,7 +1385,7 @@ const JournalTableStorage = {
     const messageRange = range.offset(1, JOURNAL_COLUMN_INDEX.MESSAGE, matrix.length - 1, 1);
     if (typeof messageRange.setFontColors !== 'function') return;
     const colors = matrix.slice(1).map(function (row) {
-      const priority = JournalTableStorage.normalizeKey(row[JOURNAL_COLUMN_INDEX.PRIORITY] || 'LOW');
+      const priority = JournalTableStorage.readPriority(row[JOURNAL_COLUMN_INDEX.PRIORITY] || 'LOW');
       const color = {
         SUCCESS: '#15803D',
         HIGH: '#C2410C',
@@ -1240,8 +1453,8 @@ function emitTurnChangeMessage(context) {
     priority: settings.priority || 'NORMAL',
     visibility: settings.visibility || { type: 'PUBLIC', targets: [] },
     message: changed
-      ? 'Ход ' + previousTurn + ' завершён. Начат ход ' + nextTurn + '.'
-      : 'Ход ' + previousTurn + ' обработан.',
+      ? 'Ход ' + previousTurn + ' завершён. Правительство приступило к ходу ' + nextTurn + '.'
+      : 'Правительство завершило обработку хода ' + previousTurn + '.',
     ttlTurns: Object.prototype.hasOwnProperty.call(settings, 'ttlTurns') ? settings.ttlTurns : 1,
   });
 }
@@ -1284,7 +1497,7 @@ GameLog.prototype._emit = function (level, message, payload) {
     subCategory: source,
     priority: priorityByLevel[level],
     visibility: this.config.visibility || { type: 'DEBUG', targets: [] },
-    message: text,
+    message: 'Служебная проверка сообщает: ' + String(message),
     ttlTurns: ttlTurns,
   });
 };
@@ -1317,7 +1530,7 @@ const SystemJournal = {
         subCategory: source,
         priority: 'CRITICAL',
         visibility: logConfig.visibility || { type: 'DEBUG', targets: [] },
-        message: text,
+        message: 'В работе игровой механики обнаружена неполадка. Администрации следует проверить журнал сервера.',
         ttlTurns: Object.prototype.hasOwnProperty.call(logConfig, 'errorTTLTurns')
           ? logConfig.errorTTLTurns
           : null,
@@ -1390,7 +1603,7 @@ function writeServerLog(message) {
  */
 function GameJournal(matrix, currentTurn, config) {
   if (!JournalTableStorage.hasHeaders(matrix)) {
-    throw new Error('NR_JOURNAL must start with the technical journal headers.');
+    throw new Error('NR_JOURNAL должен начинаться с заголовков журнала.');
   }
   this.matrix = matrix;
   this.currentTurn = currentTurn;

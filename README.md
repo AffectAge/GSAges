@@ -17,6 +17,12 @@
 6. Add your game ranges to `GAME_ENGINE_CONFIG.namedRanges`, add their automatic-creation settings to `rangeDefaults` if needed, define handlers and register them in `GAME_ENGINE_CONFIG.systems`.
 7. Run `PROCESS_TURN` once from the Apps Script editor to grant permissions. After reloading the sheet, the **Game engine → Process turn** menu will be available.
 
+## Mobile turn button
+
+Once, under the central script owner account, run **Game engine → Enable mobile turn button** (or `INSTALL_MOBILE_TURN_TRIGGER()` in the Apps Script editor) and grant the requested permissions. The engine creates a checkbox in the second data cell of `NR_GAME_CORE.MAIN`: `MAIN[1][0]` (normally cell `A3` on `_GAME_CORE`).
+
+From the Google Sheets phone app, tap that checkbox. It changes to `TRUE`, starts one game turn under the owner account, and automatically returns to `FALSE` only after the central game state was saved successfully. If the turn fails, the checkbox remains selected; after fixing the problem, tap it off and on again to retry. The owner must keep the installable edit trigger enabled.
+
 ## Data model
 
 Every named range is a matrix, so cell coordinates cannot be lost:
@@ -39,7 +45,7 @@ NR_WORLD:     PROVINCES
 NR_ORDERS:    ACTIVE | HISTORY
 NR_FACTORIES: FACTORIES
 NR_COUNTRIES: RUS | FRA | GER
-NR_JOURNAL:   TURN | CATEGORY | SUBCATEGORY | COUNTRY | PRIORITY | VISIBILITY | TTL_TURNS | MESSAGE | ID
+NR_JOURNAL:   ХОД | ВЕДОМСТВО | ТЕМА | СТРАНА | ВАЖНОСТЬ | ДОСТУП | СРОК (ХОДОВ) | СВОДКА | ИД
 ```
 
 `NR_GAME_CORE.MAIN` contains game metadata, so its turn is available as `ctx.data.NR_GAME_CORE.MAIN[0][0].turn`. `NR_WORLD.PROVINCES` is the province matrix used by the province generator.
@@ -94,6 +100,8 @@ Players put only their client order into a cell of their workbook's `ACTIVE` col
 ```
 
 `BUILD_FACTORY` checks the template, a free factory slot, and that the named province belongs to the issuing country. It creates a `CONSTRUCTING` factory with its own empty `stockpile`; the factory starts construction on the current turn and loses its first construction turn only on the following turn. Costs and construction materials are intentionally not reserved yet, so later economic mechanics can add those rules to the same order handler.
+
+After the central game state has been saved successfully, the engine removes accepted orders from the source country's `ACTIVE` cells. Invalid orders stay in the player book so they can be corrected. If the central turn or source-book acknowledgement fails, the source order is left intact; its authoritative ID makes the next import safe from duplicate execution.
 
 `NR_COUNTRIES` is configured as a country container. The first row holds technical country IDs; every following non-empty cell must be a small JSON object with a unique `key` in that country's column:
 
@@ -160,15 +168,15 @@ Systems run in ascending `priority` order. They only receive `ctx` and should no
 
 ## Journal format and TTL
 
-`NR_JOURNAL` is a readable table: one row is one message. Its headers are `TURN`, `CATEGORY`, `SUBCATEGORY`, `COUNTRY`, `PRIORITY`, `VISIBILITY`, `TTL_TURNS`, `MESSAGE`, and `ID`. Existing one-cell JSON entries are converted directly into rows on the next `PROCESS_TURN`.
+`NR_JOURNAL` is a readable player-facing table: one row is one report. Its headers are `ХОД`, `ВЕДОМСТВО`, `ТЕМА`, `СТРАНА`, `ВАЖНОСТЬ`, `ДОСТУП`, `СРОК (ХОДОВ)`, `СВОДКА`, and `ИД`.
 
-The engine automatically adds a category emoji to `MESSAGE` and colours the message text by priority: green for `SUCCESS`, orange for `HIGH`, red for `CRITICAL`, and blue for `NORMAL`. For example:
+Game systems still use internal values such as `category: 'INDUSTRY'` and `priority: 'HIGH'`, but players never see those codes. The journal renders them as ministries and clear Russian importance levels. Every message receives a short report-style introduction, an emoji, and a colour: green for good news, orange when attention is needed, red for urgent news, and blue for ordinary reports. For example:
 
 ```text
-12 | INDUSTRY | INPUTS | RUS | HIGH | COUNTRY:RUS | 2 | 🏭 ⚠️ Фабрика «Тверь» остановлена: на её складе не хватает сырья. |
+12 | Министерство промышленности | Снабжение | RUS | Требует внимания | Странам: RUS | 2 | 🏭 ⚠️ Требуется внимание: Предприятие временно остановлено: на его складе не хватает сырья. |
 ```
 
-`TTL_TURNS: 1` exists during its creation turn and is cleared at the beginning of the next turn. Leave `TTL_TURNS` blank by passing `ttlTurns: null` for a permanent entry. Temporary rows always have an empty `ID`; a removable permanent row gets a short ID such as `m28_3` so it can later be removed with `ctx.journal.remove(messageId)`. Pass `removable: false` to omit the ID as well.
+`СРОК (ХОДОВ): 1` exists during its creation turn and is cleared at the beginning of the next turn. A permanent entry displays `Постоянно`; create it by passing `ttlTurns: null`. Temporary rows always have an empty `ИД`; a removable permanent row gets a short ID such as `m28_3` so it can later be removed with `ctx.journal.remove(messageId)`. Pass `removable: false` to omit the ID as well.
 
 Supported viewer filtering helper:
 
@@ -184,9 +192,9 @@ When the journal range is full, its configuration uses `DROP_OLDEST` by default,
 
 ## System journal and errors
 
-After every successful turn, the engine adds a `SYSTEM` message such as `Ход 4 завершён. Начат ход 5.`. It is public by default and exists for one turn; change its privacy, priority, or TTL in `GAME_ENGINE_CONFIG.systemJournal.turnChange`.
+After every successful turn, the government chancellery adds a public report such as `Ход 4 завершён. Правительство приступило к ходу 5.`. It exists for one turn by default; change its privacy, priority, or TTL in `GAME_ENGINE_CONFIG.systemJournal.turnChange`.
 
-Every uncaught exception from the engine, a registered game system, or any function called by that system aborts the game-state save and is added separately to `NR_JOURNAL`. The error row has `CATEGORY: SYSTEM`, `PRIORITY: CRITICAL`, the source-system ID in `SUBCATEGORY`, and a readable error message. It is `DEBUG`-only and permanent by default; technical stack details remain in the Apps Script execution log.
+Every uncaught exception from the engine, a registered game system, or any function called by that system aborts the game-state save and is added separately to `NR_JOURNAL` as a clear urgent report. It is `DEBUG`-only and permanent by default; technical error names and stack details remain in the Apps Script execution log.
 
 For non-fatal problems and server-style messages, use the context logger in a game system:
 

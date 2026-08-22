@@ -71,7 +71,7 @@ const OrderSystem = {
 
       const definition = registry[order.type];
       if (!definition) {
-        self._finishOrder(ctx, order, 'REJECTED', 'Для типа «' + order.type + '» нет обработчика.', null);
+        self._finishOrder(ctx, order, 'REJECTED', 'Такой вид распоряжения пока не поддерживается.', null);
         completed.push(order);
         report.rejected += 1;
         return;
@@ -212,19 +212,19 @@ const OrderSystem = {
 
   _validateGeneralOrder: function (order, processedActiveIds, historyById) {
     const id = this._text(order.id);
-    if (!id) return 'У приказа отсутствует id.';
+    if (!id) return 'В распоряжении отсутствует служебный номер.';
     order.id = id;
-    if (processedActiveIds[order.id] || historyById[order.id]) return 'Приказ с ID «' + order.id + '» уже был обработан.';
+    if (processedActiveIds[order.id] || historyById[order.id]) return 'Это распоряжение уже было принято канцелярией.';
     const issuer = this._text(order.issuer);
-    if (!issuer) return 'У приказа «' + order.id + '» отсутствует отправитель.';
+    if (!issuer) return 'Не удалось определить страну-отправителя распоряжения.';
     order.issuer = issuer;
     const type = this._text(order.type);
-    if (!type) return 'У приказа «' + order.id + '» отсутствует type.';
+    if (!type) return 'В распоряжении не выбран вид действия.';
     order.type = type.toUpperCase();
-    if (!this._isObject(order.payload)) return 'У приказа «' + order.id + '» отсутствует объект payload.';
+    if (!this._isObject(order.payload)) return 'В распоряжении отсутствуют необходимые сведения.';
     const status = this._text(order.status || 'SUBMITTED').toUpperCase();
     if (status !== 'SUBMITTED' && status !== 'QUEUED') {
-      return 'Приказ «' + order.id + '» имеет недопустимый активный статус «' + status + '».';
+      return 'Распоряжение находится в состоянии, в котором его нельзя рассмотреть.';
     }
     order.status = status;
     order.dependsOn = this._normalizeDependencies(order.dependsOn, order.issuer);
@@ -235,12 +235,12 @@ const OrderSystem = {
     const dependencies = order.dependsOn || [];
     for (let index = 0; index < dependencies.length; index += 1) {
       const id = dependencies[index];
-      if (id === order.id) return { state: 'REJECTED', message: 'Приказ не может зависеть от самого себя.' };
+      if (id === order.id) return { state: 'REJECTED', message: 'Распоряжение не может ожидать исполнения самого себя.' };
       const dependency = activeById[id] || historyById[id];
-      if (!dependency) return { state: 'REJECTED', message: 'Не найден зависимый приказ «' + id + '».' };
+      if (!dependency) return { state: 'REJECTED', message: 'Не найдено предыдущее распоряжение, от которого зависит это решение.' };
       const status = this._text(dependency.status).toUpperCase();
       if (status === 'REJECTED' || status === 'FAILED' || status === 'CANCELLED') {
-        return { state: 'CANCELLED', message: 'Зависимый приказ «' + id + '» не был выполнен.' };
+        return { state: 'CANCELLED', message: 'Предыдущее распоряжение не было исполнено.' };
       }
       if (status !== 'EXECUTED') return { state: 'WAITING' };
     }
@@ -272,13 +272,21 @@ const OrderSystem = {
   },
 
   _getOrderMessage: function (order, status, message) {
+    const orderTitle = this._getOrderTitle(order.type);
     const labels = {
-      EXECUTED: 'Приказ «' + order.type + '» выполнен',
-      REJECTED: 'Приказ «' + order.type + '» отклонён',
-      CANCELLED: 'Приказ «' + order.type + '» отменён',
-      FAILED: 'Приказ «' + order.type + '» завершился ошибкой',
+      EXECUTED: 'Канцелярия исполнила распоряжение: ' + orderTitle,
+      REJECTED: 'Канцелярия отклонила распоряжение: ' + orderTitle,
+      CANCELLED: 'Канцелярия отменила распоряжение: ' + orderTitle,
+      FAILED: 'При исполнении распоряжения возникла неполадка: ' + orderTitle,
     };
-    return (labels[status] || 'Приказ «' + order.type + '» обработан') + ': ' + String(message || 'Нет подробностей.');
+    return (labels[status] || 'Канцелярия рассмотрела распоряжение: ' + orderTitle) +
+      '. ' + String(message || 'Дополнительных сведений нет.');
+  },
+
+  _getOrderTitle: function (type) {
+    return {
+      BUILD_FACTORY: 'строительство фабрики',
+    }[this._text(type) ? type.toUpperCase() : ''] || 'особое распоряжение';
   },
 
   _emitMalformedOrder: function (ctx, message) {
@@ -287,7 +295,7 @@ const OrderSystem = {
       subCategory: 'VALIDATION',
       priority: 'HIGH',
       visibility: { type: 'DEBUG', targets: [] },
-      message: 'Некорректный приказ удалён: ' + message,
+      message: 'Канцелярия отклонила некорректно оформленное распоряжение. ' + message,
       ttlTurns: 3,
     });
   },
@@ -387,6 +395,7 @@ const CountryOrderGateway = {
   importSubmittedOrders: function (ctx) {
     const books = this._readRegisteredBooks(ctx);
     const imported = [];
+    const acknowledgements = [];
     const self = this;
 
     books.forEach(function (book) {
@@ -394,9 +403,17 @@ const CountryOrderGateway = {
       const settings = book.settings;
       try {
         const batches = self._readCountryOutbox(settings);
+        const normalizedOrders = [];
+        const clientOrderIds = [];
         batches.forEach(function (clientOrder) {
-          imported.push(OrderSystem.normalizeClientOrder(countryId, clientOrder, ctx.turn));
+          const normalized = OrderSystem.normalizeClientOrder(countryId, clientOrder, ctx.turn);
+          normalizedOrders.push(normalized);
+          clientOrderIds.push(normalized.clientOrderId);
         });
+        imported.push.apply(imported, normalizedOrders);
+        if (clientOrderIds.length) {
+          acknowledgements.push({ countryId: countryId, settings: settings, clientOrderIds: clientOrderIds });
+        }
       } catch (error) {
         ctx.journal.emit({
           country: countryId,
@@ -404,13 +421,40 @@ const CountryOrderGateway = {
           subCategory: 'IMPORT',
           priority: 'HIGH',
           visibility: { type: 'COUNTRY', targets: [countryId] },
-          message: 'Не удалось принять приказы страны: ' + String(error.message || error),
+          message: 'Канцелярия не смогла принять новые распоряжения. Проверьте их оформление и доступ к книге страны.',
           ttlTurns: 3,
         });
         writeServerLog('[WARNING][ORDERS] ' + countryId + ': ' + String(error.message || error));
       }
     });
-    return OrderSystem.importExternalOrders(ctx, imported);
+    const report = OrderSystem.importExternalOrders(ctx, imported);
+    ctx.runtime.countryOrderAcknowledgements = acknowledgements;
+    return report;
+  },
+
+  /**
+   * Runs only after the central turn was fully saved. If this step fails, the
+   * player order remains in the source book and replay protection handles it.
+   */
+  acknowledgeImportedOrders: function (ctx) {
+    const acknowledgements = ctx.runtime.countryOrderAcknowledgements || [];
+    const report = { countries: 0, removed: 0, failed: 0 };
+    acknowledgements.forEach(function (acknowledgement) {
+      try {
+        const removed = CountryOrderGateway._removeAcknowledgedOrders(
+          acknowledgement.settings,
+          acknowledgement.clientOrderIds
+        );
+        report.countries += 1;
+        report.removed += removed;
+      } catch (error) {
+        report.failed += 1;
+        writeServerLog(
+          '[WARNING][ORDERS_ACK] ' + acknowledgement.countryId + ': ' + String(error.message || error)
+        );
+      }
+    });
+    return report;
   },
 
   initializeRegisteredBooks: function (ctx) {
@@ -504,6 +548,46 @@ const CountryOrderGateway = {
       batch.forEach(function (order) { orders.push(order); });
     }
     return orders;
+  },
+
+  _removeAcknowledgedOrders: function (settings, clientOrderIds) {
+    const acknowledged = Object.create(null);
+    clientOrderIds.forEach(function (clientOrderId) { acknowledged[clientOrderId] = true; });
+    if (!Object.keys(acknowledged).length) return 0;
+
+    const spreadsheet = SpreadsheetApp.openById(settings.spreadsheetId);
+    const rangeName = settings.ordersRange || ORDER_SYSTEM_CONFIG.rangeName;
+    const range = spreadsheet.getRangeByName(rangeName);
+    if (!range) throw new Error('Контейнер ' + rangeName + ' больше не существует.');
+    const values = range.getValues().map(function (row) {
+      return row.map(CellCodec.decode);
+    });
+    const header = String(settings.activeHeader || ORDER_SYSTEM_CONFIG.activeSubrange).trim().toUpperCase();
+    const activeColumn = (values[0] || []).map(readContainerKey).indexOf(header);
+    if (activeColumn === -1) throw new Error('В контейнере ' + rangeName + ' нет колонки ' + header + '.');
+
+    let removed = 0;
+    let changed = false;
+    for (let row = 1; row < values.length; row += 1) {
+      const batch = values[row][activeColumn];
+      if (!Array.isArray(batch)) continue;
+      const retained = batch.filter(function (clientOrder) {
+        if (!OrderSystem._isObject(clientOrder)) return true;
+        const clientOrderId = OrderSystem._text(clientOrder.clientOrderId || clientOrder.id);
+        if (!clientOrderId || !acknowledged[clientOrderId]) return true;
+        removed += 1;
+        return false;
+      });
+      if (retained.length === batch.length) continue;
+      values[row][activeColumn] = retained.length ? retained : null;
+      changed = true;
+    }
+    if (changed) {
+      range.setValues(values.map(function (row) {
+        return row.map(CellCodec.encode);
+      }));
+    }
+    return removed;
   },
 
   /** Creates the player outbox on its own sheet if the workbook has none yet. */
