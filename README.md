@@ -5,9 +5,9 @@
 ## Quick start
 
 1. Open the target spreadsheet: **Extensions → Apps Script**.
-2. Create script files named `GameEngine.gs` and `FactorySystem.gs`, then paste in [GameEngine.gs](GameEngine.gs) and [FactorySystem.gs](FactorySystem.gs).
-3. By default, every missing active range is created on its own sheet at the start of `PROCESS_TURN`: `_GAME_CORE`, `_GAME_WORLD`, `_GAME_FACTORIES`, `_GAME_COUNTRIES`, and `_GAME_JOURNAL`.
-4. `NR_GAME_CORE` is initialized with technical headers `MAIN` and `FACTORY_TEMPLATES`. The latter contains the editable base template `TEXTILE_MILL`; older containers receive the missing column and template on the next `PROCESS_TURN`, without replacing existing data. `_GAME_FACTORIES` likewise receives the missing `FACTORIES` column, but starts with no factory instances.
+2. Create script files named `GameEngine.gs`, `OrderSystem.gs`, and `FactorySystem.gs`, then paste in [GameEngine.gs](GameEngine.gs), [OrderSystem.gs](OrderSystem.gs), and [FactorySystem.gs](FactorySystem.gs).
+3. By default, every missing active range is created on its own sheet at the start of `PROCESS_TURN`: `_GAME_CORE`, `_GAME_WORLD`, `_GAME_ORDERS`, `_GAME_FACTORIES`, `_GAME_COUNTRIES`, and `_GAME_JOURNAL`.
+4. `NR_GAME_CORE` is initialized with technical headers `MAIN`, `FACTORY_TEMPLATES`, and `COUNTRY_BOOKS`. The template column contains the editable base template `TEXTILE_MILL`; an older container receives a missing technical column on the next `PROCESS_TURN`, without replacing existing data. `_GAME_FACTORIES` likewise receives the missing `FACTORIES` column, but starts with no factory instances.
 
    ```json
    {"turn":1,"status":"WAITING"}
@@ -34,11 +34,12 @@ The engine currently reads values, not formula definitions. Do not place formula
 A container is one physical named range read in one `getValues()` call and written in at most one `setValues()` call. Its technical headers create virtual data areas in `ctx.data`, avoiding a named range and a Sheets API call for every mechanic. The engine's active data layout is:
 
 ```text
-NR_GAME_CORE: MAIN | BUILDING_TEMPLATES | UNIT_TEMPLATES | RULES
-NR_WORLD:     PROVINCES | UNITS | BUILDINGS | EFFECTS
+NR_GAME_CORE: MAIN | FACTORY_TEMPLATES | COUNTRY_BOOKS
+NR_WORLD:     PROVINCES
+NR_ORDERS:    ACTIVE | HISTORY
 NR_FACTORIES: FACTORIES
 NR_COUNTRIES: RUS | FRA | GER
-NR_JOURNAL:   separate, one message per cell
+NR_JOURNAL:   TURN | CATEGORY | SUBCATEGORY | COUNTRY | PRIORITY | VISIBILITY | TTL_TURNS | MESSAGE | ID
 ```
 
 `NR_GAME_CORE.MAIN` contains game metadata, so its turn is available as `ctx.data.NR_GAME_CORE.MAIN[0][0].turn`. `NR_WORLD.PROVINCES` is the province matrix used by the province generator.
@@ -52,7 +53,7 @@ NR_JOURNAL:   separate, one message per cell
 `NR_GAME_CORE.FACTORY_TEMPLATES` is created automatically and begins with this editable template:
 
 ```json
-{"id":"TEXTILE_MILL","inputs":{"cotton":2,"coal":0.1},"outputs":{"clothes":1},"productionPerLevel":1,"pollutionPerCycle":2}
+{"id":"TEXTILE_MILL","inputs":{"cotton":2,"coal":0.1},"outputs":{"clothes":1},"productionPerLevel":1,"constructionTurns":3,"pollutionPerCycle":2}
 ```
 
 Put factory instances in `NR_FACTORIES.FACTORIES`:
@@ -62,6 +63,37 @@ Put factory instances in `NR_FACTORIES.FACTORIES`:
 ```
 
 For every production cycle, input quantities are removed from the factory stockpile and output quantities are added to that same object. `CONSTRUCTING`, `ACTIVE`, and `PAUSED` are supported statuses. Warnings about missing templates or input goods and construction-completion events go to the game journal. Old `workers` and `workersPerLevel` fields, if present, are ignored and left unchanged.
+
+## Orders and country workbooks
+
+[OrderSystem.gs](OrderSystem.gs) holds the universal order queue in the central `_GAME_ORDERS` sheet. `ACTIVE` is the pending queue; `HISTORY` contains orders that have finished, been rejected, failed, or were cancelled. Each non-empty cell is a JSON array of at most 20 orders. There is deliberately no separate character-count limit in the engine.
+
+For a country workbook, add one JSON record to a free cell in the central `NR_GAME_CORE.COUNTRY_BOOKS` column:
+
+```json
+{"id":"RUS","spreadsheetId":"GOOGLE_SPREADSHEET_ID"}
+{"id":"FRA","spreadsheetId":"ANOTHER_GOOGLE_SPREADSHEET_ID"}
+```
+
+`id` is the country identifier; it must be unique. `spreadsheetId` is the ID from the country book URL; it must also be unique. Optional technical fields are `ordersRange`, `activeHeader`, and `ordersSheetName`. On the first `PROCESS_TURN`, the central engine opens every registered workbook. If its `NR_ORDERS` named range is absent, the engine automatically creates a separate `_ORDERS` sheet with a 1,001 × 2 `NR_ORDERS` container and headers `ACTIVE | HISTORY`. The menu item **Game engine → Create country order containers** creates the same missing containers immediately. The central script account needs editor access to each country workbook.
+
+Players put only their client order into a cell of their workbook's `ACTIVE` column. The server obtains the country ID from `NR_GAME_CORE.COUNTRY_BOOKS`, builds the authoritative ID `<country>:<clientOrderId>`, and ignores duplicate deliveries safely:
+
+```json
+[
+  {
+    "clientOrderId": "build_textile_1",
+    "type": "BUILD_FACTORY",
+    "payload": {
+      "templateId": "TEXTILE_MILL",
+      "provinceId": "prov_1",
+      "level": 1
+    }
+  }
+]
+```
+
+`BUILD_FACTORY` checks the template, a free factory slot, and that the named province belongs to the issuing country. It creates a `CONSTRUCTING` factory with its own empty `stockpile`; the factory starts construction on the current turn and loses its first construction turn only on the following turn. Costs and construction materials are intentionally not reserved yet, so later economic mechanics can add those rules to the same order handler.
 
 `NR_COUNTRIES` is configured as a country container. The first row holds technical country IDs; every following non-empty cell must be a small JSON object with a unique `key` in that country's column:
 
@@ -107,6 +139,7 @@ function processEconomy(ctx) {
   ctx.journal.emit({
     country: 'RUS',
     category: 'ECONOMY',
+    subCategory: 'BUDGET',
     priority: 'NORMAL',
     visibility: { type: 'COUNTRY', targets: ['RUS'] },
     message: 'Государственный бюджет получил 100 золота.',
@@ -127,22 +160,15 @@ Systems run in ascending `priority` order. They only receive `ctx` and should no
 
 ## Journal format and TTL
 
-One `NR_JOURNAL` cell stores one JSON message. A temporary message stores only game-relevant data: `createdTurn` and `expiresAtTurn` are added automatically, while `id` and real-time timestamps are omitted.
+`NR_JOURNAL` is a readable table: one row is one message. Its headers are `TURN`, `CATEGORY`, `SUBCATEGORY`, `COUNTRY`, `PRIORITY`, `VISIBILITY`, `TTL_TURNS`, `MESSAGE`, and `ID`. Existing one-cell JSON entries are converted directly into rows on the next `PROCESS_TURN`.
 
-```json
-{
-  "createdTurn":1,
-  "country":"RUS",
-  "category":"ECONOMY",
-  "priority":"NORMAL",
-  "visibility":{"type":"COUNTRY","targets":["RUS"]},
-  "message":"Государственный бюджет получил 100 золота.",
-  "ttlTurns":1,
-  "expiresAtTurn":2
-}
+The engine automatically adds a category emoji to `MESSAGE` and colours the message text by priority: green for `SUCCESS`, orange for `HIGH`, red for `CRITICAL`, and blue for `NORMAL`. For example:
+
+```text
+12 | INDUSTRY | INPUTS | RUS | HIGH | COUNTRY:RUS | 2 | 🏭 ⚠️ Фабрика «Тверь» остановлена: на её складе не хватает сырья. |
 ```
 
-`ttlTurns: 1` exists during its creation turn and is cleared at the beginning of the next turn. Use `ttlTurns: 3` for three turns, or `ttlTurns: null` for a permanent entry. A permanent message gets a short ID such as `m28_3` by default, so it can be removed later with `ctx.journal.remove(messageId)`. Pass `removable: false` to a permanent message to omit its ID as well.
+`TTL_TURNS: 1` exists during its creation turn and is cleared at the beginning of the next turn. Leave `TTL_TURNS` blank by passing `ttlTurns: null` for a permanent entry. Temporary rows always have an empty `ID`; a removable permanent row gets a short ID such as `m28_3` so it can later be removed with `ctx.journal.remove(messageId)`. Pass `removable: false` to omit the ID as well.
 
 Supported viewer filtering helper:
 
@@ -160,7 +186,7 @@ When the journal range is full, its configuration uses `DROP_OLDEST` by default,
 
 After every successful turn, the engine adds a `SYSTEM` message such as `Ход 4 завершён. Начат ход 5.`. It is public by default and exists for one turn; change its privacy, priority, or TTL in `GAME_ENGINE_CONFIG.systemJournal.turnChange`.
 
-Every uncaught exception from the engine, a registered game system, or any function called by that system aborts the game-state save and is added separately to `NR_JOURNAL`. The error record has `category: 'SYSTEM'`, `priority: 'CRITICAL'`, source-system ID, message, and (by default) a stack trace in `payload`. It is `DEBUG`-only and permanent by default, so a player UI should show it only to a debug/admin viewer.
+Every uncaught exception from the engine, a registered game system, or any function called by that system aborts the game-state save and is added separately to `NR_JOURNAL`. The error row has `CATEGORY: SYSTEM`, `PRIORITY: CRITICAL`, the source-system ID in `SUBCATEGORY`, and a readable error message. It is `DEBUG`-only and permanent by default; technical stack details remain in the Apps Script execution log.
 
 For non-fatal problems and server-style messages, use the context logger in a game system:
 

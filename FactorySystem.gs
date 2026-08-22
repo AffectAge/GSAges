@@ -30,6 +30,83 @@ const FACTORY_SYSTEM_CONFIG = {
  * }
  */
 const FactorySystem = {
+  /** Order types owned by this mechanic. OrderSystem invokes these handlers. */
+  getOrderDefinitions: function () {
+    return [{
+      type: 'BUILD_FACTORY',
+      category: 'CONSTRUCTION',
+      phase: 'CONSTRUCTION',
+      priority: 500,
+      validate: function (ctx, order) {
+        return FactorySystem.validateBuildFactoryOrder(ctx, order);
+      },
+      execute: function (ctx, order) {
+        return FactorySystem.executeBuildFactoryOrder(ctx, order);
+      },
+    }];
+  },
+
+  /**
+   * The first order implementation. Costs and construction materials are not
+   * reserved yet: the order checks ownership, template and free factory slot.
+   */
+  validateBuildFactoryOrder: function (ctx, order) {
+    const payload = order.payload || {};
+    const templateId = this._isText(payload.templateId) ? payload.templateId.trim() : null;
+    const provinceId = this._isText(payload.provinceId) ? payload.provinceId.trim() : null;
+    const level = payload.level === undefined ? 1 : payload.level;
+    if (!templateId) return 'Не указан templateId фабрики.';
+    if (!provinceId) return 'Не указана provinceId для строительства.';
+    if (!this._isFiniteNumber(level) || !Number.isInteger(level) || level < 1) {
+      return 'Уровень фабрики должен быть целым числом не меньше 1.';
+    }
+
+    const templates = this._indexTemplates(ctx);
+    if (!templates[templateId]) return 'Шаблон фабрики «' + templateId + '» не найден.';
+
+    const provinces = this._indexProvinces(ctx);
+    const province = provinces[provinceId];
+    if (!province) return 'Провинция «' + provinceId + '» не найдена.';
+    if (province.owner !== order.issuer) {
+      return 'Провинция «' + provinceId + '» не принадлежит стране «' + order.issuer + '».';
+    }
+
+    const factories = this._getSubrange(ctx, FACTORY_SYSTEM_CONFIG.factoriesRange, FACTORY_SYSTEM_CONFIG.factoriesSubrange);
+    if (!factories || !this._findFirstEmptyCell(factories)) return 'Нет свободного места в контейнере фабрик.';
+    const factoryId = this._factoryIdForOrder(order);
+    if (this._containsId(factories, factoryId)) {
+      return 'Фабрика для приказа «' + order.id + '» уже существует.';
+    }
+    return { ok: true };
+  },
+
+  executeBuildFactoryOrder: function (ctx, order) {
+    const factories = this._getSubrange(ctx, FACTORY_SYSTEM_CONFIG.factoriesRange, FACTORY_SYSTEM_CONFIG.factoriesSubrange);
+    const target = factories && this._findFirstEmptyCell(factories);
+    if (!target) return { ok: false, message: 'Нет свободного места в контейнере фабрик.' };
+
+    const payload = order.payload;
+    const template = this._indexTemplates(ctx)[payload.templateId];
+    const constructionTurns = Math.max(1, Math.floor(this._number(template.constructionTurns, 1)));
+    const factoryId = this._factoryIdForOrder(order);
+    factories[target.row][target.column] = {
+      id: factoryId,
+      templateId: payload.templateId,
+      owner: order.issuer,
+      provinceId: payload.provinceId,
+      level: payload.level === undefined ? 1 : payload.level,
+      efficiency: 1,
+      stockpile: {},
+      status: 'CONSTRUCTING',
+      constructionStartedTurn: ctx.turn,
+      constructionTurnsRemaining: constructionTurns,
+    };
+    return {
+      ok: true,
+      message: 'Строительство фабрики «' + factoryId + '» начато. Срок: ' + constructionTurns + ' ход(а).',
+    };
+  },
+
   process: function (ctx) {
     const initialized = this._ensureStorage(ctx);
     const factories = initialized.factories;
@@ -116,15 +193,32 @@ const FactorySystem = {
   },
 
   _putIntoFirstEmptyCell: function (matrix, value, label) {
+    const target = this._findFirstEmptyCell(matrix);
+    if (target) {
+      matrix[target.row][target.column] = value;
+      return;
+    }
+    throw new Error('No empty cell is available for the default ' + label + '.');
+  },
+
+  _findFirstEmptyCell: function (matrix) {
     for (let row = 0; row < matrix.length; row += 1) {
       for (let column = 0; column < matrix[row].length; column += 1) {
         if (matrix[row][column] === null || matrix[row][column] === undefined) {
-          matrix[row][column] = value;
-          return;
+          return {
+            row: row,
+            column: column,
+          };
         }
       }
     }
-    throw new Error('No empty cell is available for the default ' + label + '.');
+    return null;
+  },
+
+  _factoryIdForOrder: function (order) {
+    const country = String(order.issuer || 'country').toLowerCase().replace(/[^a-z0-9_-]+/g, '_');
+    const source = String(order.clientOrderId || order.id || 'order').replace(/[^a-zA-Z0-9_-]+/g, '_');
+    return 'factory_' + country + '_' + source;
   },
 
   _processFactory: function (ctx, factory, templates, provinces, report, row, column) {
@@ -134,17 +228,30 @@ const FactorySystem = {
     }
     this._ensureFactoryDefaults(factory);
     if (!this._isText(factory.templateId)) {
-      this._setOperationalStatus(ctx, factory, 'TEMPLATE_MISSING', 'Factory has no templateId.');
+      this._setOperationalStatus(
+        ctx,
+        factory,
+        'TEMPLATE_MISSING',
+        'Для фабрики «' + factory.id + '» не выбран шаблон.',
+        'TEMPLATE'
+      );
       return;
     }
 
     const template = templates[factory.templateId];
     if (!template) {
-      this._setOperationalStatus(ctx, factory, 'TEMPLATE_MISSING', 'Factory template is missing: ' + factory.templateId + '.');
+      this._setOperationalStatus(
+        ctx,
+        factory,
+        'TEMPLATE_MISSING',
+        'Фабрика «' + factory.id + '» остановлена: шаблон «' + factory.templateId + '» не найден.',
+        'TEMPLATE'
+      );
       return;
     }
 
     if (factory.status === 'CONSTRUCTING') {
+      if (factory.constructionStartedTurn === ctx.turn) return;
       this._processConstruction(ctx, factory);
       return;
     }
@@ -160,7 +267,13 @@ const FactorySystem = {
 
     const availableCycles = this._limitByInputs(factory.stockpile, template.inputs || {}, cycles);
     if (availableCycles <= 0) {
-      this._setOperationalStatus(ctx, factory, 'INPUT_SHORTAGE', 'Factory has insufficient input goods.');
+      this._setOperationalStatus(
+        ctx,
+        factory,
+        'INPUT_SHORTAGE',
+        'Фабрика «' + factory.id + '» остановлена: на её складе не хватает сырья.',
+        'INPUTS'
+      );
       factory.lastProduction = { turn: ctx.turn, cycles: 0, outputs: {} };
       return;
     }
@@ -189,7 +302,7 @@ const FactorySystem = {
     factory.constructionTurnsRemaining = 0;
     factory.status = 'ACTIVE';
     factory.operationalStatus = 'RUNNING';
-    this._emit(ctx, factory, 'NORMAL', 'Construction completed: ' + factory.id + '.', 2);
+    this._emit(ctx, factory, 'SUCCESS', 'Строительство фабрики «' + factory.id + '» завершено.', 2, 'CONSTRUCTION');
   },
 
   _calculateCycles: function (factory, template) {
@@ -229,7 +342,13 @@ const FactorySystem = {
   _applyPollution: function (ctx, factory, provinces, amount) {
     const province = provinces[factory.provinceId];
     if (!province) {
-      this._setOperationalStatus(ctx, factory, 'PROVINCE_MISSING', 'Factory province is missing: ' + factory.provinceId + '.');
+      this._setOperationalStatus(
+        ctx,
+        factory,
+        'PROVINCE_MISSING',
+        'Фабрика «' + factory.id + '» не может работать: провинция «' + factory.provinceId + '» не найдена.',
+        'PROVINCE'
+      );
       return false;
     }
     province.pollution = this._number(province.pollution, 0) + amount;
@@ -243,24 +362,24 @@ const FactorySystem = {
     if (!this._isFiniteNumber(factory.efficiency) || factory.efficiency < 0) factory.efficiency = 1;
   },
 
-  _setOperationalStatus: function (ctx, factory, status, message) {
+  _setOperationalStatus: function (ctx, factory, status, message, subCategory) {
     const changed = factory.operationalStatus !== status;
     factory.operationalStatus = status;
-    if (changed) this._emit(ctx, factory, 'HIGH', message, 2);
+    if (changed) this._emit(ctx, factory, 'HIGH', message, 2, subCategory || 'FACTORY');
   },
 
-  _emit: function (ctx, factory, priority, message, ttlTurns) {
+  _emit: function (ctx, factory, priority, message, ttlTurns, subCategory) {
     const owner = this._isText(factory.owner) ? factory.owner : null;
     ctx.journal.emit({
       country: owner,
       category: FACTORY_SYSTEM_CONFIG.category,
+      subCategory: subCategory || 'FACTORY',
       priority: priority,
       visibility: owner
         ? { type: 'COUNTRY', targets: [owner] }
         : { type: 'DEBUG', targets: [] },
       message: message,
       ttlTurns: ttlTurns,
-      payload: { type: 'FACTORY_EVENT', factoryId: factory.id, provinceId: factory.provinceId || null },
     });
   },
 
