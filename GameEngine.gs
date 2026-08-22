@@ -22,6 +22,23 @@ const GAME_ENGINE_CONFIG = {
   // Keep false when the spreadsheet contains service/UI ranges that must not be saved.
   loadAllNamedRanges: false,
 
+  // Missing explicitly configured ranges are created on this sheet before LOAD.
+  // Automatically discovered ranges (loadAllNamedRanges) cannot be created because
+  // their names are not known until they already exist.
+  autoCreateMissingRanges: true,
+  autoCreateSheetName: '_GAME_DATA',
+  defaultNewRange: { rows: 1, columns: 1 },
+  rangeDefaults: {
+    NR_GAME_META: {
+      rows: 1,
+      columns: 1,
+      initialValues: [[{ turn: 1, status: 'WAITING' }]],
+    },
+    NR_JOURNAL: { rows: 500, columns: 1 },
+    // Example when adding a range:
+    // NR_PLAYERS: { rows: 100, columns: 1 },
+  },
+
   // These ranges are loaded but never written by the engine (for example, rules).
   readOnlyRanges: [
     // 'NR_RULES',
@@ -101,6 +118,7 @@ const GameEngine = {
       processedTurn: context.turn,
       nextTurn: context.meta.turn,
       emittedMessages: context.journal.emittedCount,
+      createdRanges: loaded.createdRanges,
       durationMs: new Date().getTime() - startedAt.getTime(),
     };
   },
@@ -110,6 +128,7 @@ const GameEngine = {
 const NamedRangeStorage = {
   load: function (spreadsheet, config) {
     const names = this._getManagedNames(spreadsheet, config);
+    const createdRanges = this._createMissingRanges(spreadsheet, names, config);
     const data = Object.create(null);
     const bindings = Object.create(null);
 
@@ -130,7 +149,7 @@ const NamedRangeStorage = {
       };
     });
 
-    return { data: data, bindings: bindings };
+    return { data: data, bindings: bindings, createdRanges: createdRanges };
   },
 
   save: function (loaded, config) {
@@ -169,6 +188,60 @@ const NamedRangeStorage = {
     add(config.journalRange);
 
     return names;
+  },
+
+  _createMissingRanges: function (spreadsheet, names, config) {
+    if (!config.autoCreateMissingRanges) return [];
+
+    const created = [];
+    const nextFreeRowBySheet = Object.create(null);
+    const getNextFreeRow = function (sheet) {
+      const key = sheet.getSheetId();
+      if (nextFreeRowBySheet[key]) return nextFreeRowBySheet[key];
+
+      let nextRow = Math.max(1, sheet.getLastRow() + 1);
+      spreadsheet.getNamedRanges().forEach(function (namedRange) {
+        const range = namedRange.getRange();
+        if (range.getSheet().getSheetId() === key) {
+          nextRow = Math.max(nextRow, range.getLastRow() + 1);
+        }
+      });
+      nextFreeRowBySheet[key] = nextRow;
+      return nextRow;
+    };
+
+    names.forEach(function (name) {
+      if (spreadsheet.getRangeByName(name)) return;
+
+      const definition = config.rangeDefaults[name] || config.defaultNewRange || {};
+      const rows = Number(definition.rows || 1);
+      const columns = Number(definition.columns || 1);
+      if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(columns) || columns < 1) {
+        throw new Error('Invalid automatic size for named range ' + name + '.');
+      }
+
+      const sheetName = definition.sheetName || config.autoCreateSheetName;
+      let sheet = spreadsheet.getSheetByName(sheetName);
+      if (!sheet) sheet = spreadsheet.insertSheet(sheetName);
+
+      const startRow = definition.startRow || getNextFreeRow(sheet);
+      const startColumn = definition.startColumn || 1;
+      ensureSheetCapacity(sheet, startRow + rows - 1, startColumn + columns - 1);
+
+      const range = sheet.getRange(startRow, startColumn, rows, columns);
+      spreadsheet.setNamedRange(name, range);
+
+      if (definition.initialValues !== undefined) {
+        assertMatrixShape(definition.initialValues, rows, columns, 'initialValues for ' + name);
+        range.setValues(definition.initialValues.map(function (row) {
+          return row.map(CellCodec.encode);
+        }));
+      }
+      const key = sheet.getSheetId();
+      nextFreeRowBySheet[key] = Math.max(nextFreeRowBySheet[key] || 1, startRow + rows);
+      created.push(name);
+    });
+    return created;
   },
 };
 
@@ -466,6 +539,13 @@ function assertMatrixShape(matrix, expectedRows, expectedColumns, rangeName) {
       throw new Error('The number of columns in row ' + index + ' of ' + rangeName + ' was changed in memory.');
     }
   });
+}
+
+function ensureSheetCapacity(sheet, requiredLastRow, requiredLastColumn) {
+  const missingRows = requiredLastRow - sheet.getMaxRows();
+  const missingColumns = requiredLastColumn - sheet.getMaxColumns();
+  if (missingRows > 0) sheet.insertRowsAfter(sheet.getMaxRows(), missingRows);
+  if (missingColumns > 0) sheet.insertColumnsAfter(sheet.getMaxColumns(), missingColumns);
 }
 
 function indexByValue(values) {

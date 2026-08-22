@@ -6,15 +6,15 @@
 
 1. Open the target spreadsheet: **Extensions → Apps Script**.
 2. Create a script file named `GameEngine.gs` and paste in [GameEngine.gs](GameEngine.gs).
-3. Create the named ranges from the configuration. At a minimum, create `NR_GAME_META` and `NR_JOURNAL`.
-4. In the first cell of `NR_GAME_META`, put:
+3. By default, missing explicitly configured named ranges are created automatically on `_GAME_DATA` at the start of `PROCESS_TURN`. This creates `NR_GAME_META` with turn `1` and a 500-cell `NR_JOURNAL`.
+4. To create a range manually instead, create it with the same name. In the first cell of `NR_GAME_META`, put:
 
    ```json
    {"turn":1,"status":"WAITING"}
    ```
 
-5. Make `NR_JOURNAL` a sufficiently large range of blank cells, e.g. `Journal!A2:A501`.
-6. Add your game ranges to `GAME_ENGINE_CONFIG.namedRanges`, define handlers and register them in `GAME_ENGINE_CONFIG.systems`.
+5. Adjust `rangeDefaults` if `NR_JOURNAL` needs another capacity, or if a new game range needs a particular size/sheet/cell position.
+6. Add your game ranges to `GAME_ENGINE_CONFIG.namedRanges`, add their automatic-creation settings to `rangeDefaults` if needed, define handlers and register them in `GAME_ENGINE_CONFIG.systems`.
 7. Run `PROCESS_TURN` once from the Apps Script editor to grant permissions. After reloading the sheet, the **Game engine → Process turn** menu will be available.
 
 ## Data model
