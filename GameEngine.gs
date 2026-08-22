@@ -680,7 +680,6 @@ function createDefaultFactoryTemplate() {
     inputs: { cotton: 2, coal: 0.1 },
     outputs: { clothes: 1 },
     productionPerLevel: 1,
-    workersPerLevel: 10000,
     pollutionPerCycle: 2,
   };
 }

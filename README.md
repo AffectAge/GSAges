@@ -47,21 +47,21 @@ NR_JOURNAL:   separate, one message per cell
 
 ## Factory system
 
-[FactorySystem.gs](FactorySystem.gs) is a separate turn-mechanics file and is already registered in `GAME_ENGINE_CONFIG.systems` as `FACTORIES`. Add both script files to the Apps Script project. The system uses only the factory's own `stockpile`: it consumes inputs, adds outputs to that stockpile, scales production by workers/level/efficiency, handles construction completion, and applies factory pollution to its province. It does not use a country stockpile or market.
+[FactorySystem.gs](FactorySystem.gs) is a separate turn-mechanics file and is already registered in `GAME_ENGINE_CONFIG.systems` as `FACTORIES`. Add both script files to the Apps Script project. The system uses only the factory's own `stockpile`: it consumes inputs, adds outputs to that stockpile, scales production by level and efficiency, handles construction completion, and applies factory pollution to its province. It does not use a country stockpile, workers, or market.
 
 `NR_GAME_CORE.FACTORY_TEMPLATES` is created automatically and begins with this editable template:
 
 ```json
-{"id":"TEXTILE_MILL","inputs":{"cotton":2,"coal":0.1},"outputs":{"clothes":1},"productionPerLevel":1,"workersPerLevel":10000,"pollutionPerCycle":2}
+{"id":"TEXTILE_MILL","inputs":{"cotton":2,"coal":0.1},"outputs":{"clothes":1},"productionPerLevel":1,"pollutionPerCycle":2}
 ```
 
 Put factory instances in `NR_FACTORIES.FACTORIES`:
 
 ```json
-{"id":"factory_rus_1","templateId":"TEXTILE_MILL","owner":"RUS","provinceId":"prov_1","level":1,"workers":8000,"efficiency":1,"stockpile":{"cotton":20,"coal":3,"clothes":0},"status":"ACTIVE"}
+{"id":"factory_rus_1","templateId":"TEXTILE_MILL","owner":"RUS","provinceId":"prov_1","level":1,"efficiency":1,"stockpile":{"cotton":20,"coal":3,"clothes":0},"status":"ACTIVE"}
 ```
 
-For every production cycle, input quantities are removed from the factory stockpile and output quantities are added to that same object. `CONSTRUCTING`, `ACTIVE`, and `PAUSED` are supported statuses. Warnings about missing templates, workers, or input goods and construction-completion events go to the game journal.
+For every production cycle, input quantities are removed from the factory stockpile and output quantities are added to that same object. `CONSTRUCTING`, `ACTIVE`, and `PAUSED` are supported statuses. Warnings about missing templates or input goods and construction-completion events go to the game journal. Old `workers` and `workersPerLevel` fields, if present, are ignored and left unchanged.
 
 `NR_COUNTRIES` is configured as a country container. The first row holds technical country IDs; every following non-empty cell must be a small JSON object with a unique `key` in that country's column:
 

@@ -18,7 +18,7 @@ const FACTORY_SYSTEM_CONFIG = {
  * Factory record example:
  * {
  *   "id":"factory_rus_1", "templateId":"TEXTILE_MILL", "owner":"RUS",
- *   "provinceId":"prov_1", "level":1, "workers":8000,
+ *   "provinceId":"prov_1", "level":1, "efficiency":1,
  *   "stockpile":{"cotton":20,"coal":3,"clothes":0}, "status":"ACTIVE"
  * }
  *
@@ -26,7 +26,7 @@ const FACTORY_SYSTEM_CONFIG = {
  * {
  *   "id":"TEXTILE_MILL", "inputs":{"cotton":2,"coal":0.1},
  *   "outputs":{"clothes":1}, "productionPerLevel":1,
- *   "workersPerLevel":10000, "pollutionPerCycle":2
+ *   "pollutionPerCycle":2
  * }
  */
 const FactorySystem = {
@@ -132,6 +132,7 @@ const FactorySystem = {
       ctx.log.error('Factory has no id.', { row: row, column: column });
       return;
     }
+    this._ensureFactoryDefaults(factory);
     if (!this._isText(factory.templateId)) {
       this._setOperationalStatus(ctx, factory, 'TEMPLATE_MISSING', 'Factory has no templateId.');
       return;
@@ -143,7 +144,6 @@ const FactorySystem = {
       return;
     }
 
-    this._ensureFactoryDefaults(factory);
     if (factory.status === 'CONSTRUCTING') {
       this._processConstruction(ctx, factory);
       return;
@@ -153,7 +153,7 @@ const FactorySystem = {
     report.processed += 1;
     const cycles = this._calculateCycles(factory, template);
     if (cycles <= 0) {
-      this._setOperationalStatus(ctx, factory, 'NO_WORKERS', 'Factory has no available workers.');
+      factory.operationalStatus = 'IDLE';
       factory.lastProduction = { turn: ctx.turn, cycles: 0, outputs: {} };
       return;
     }
@@ -195,12 +195,7 @@ const FactorySystem = {
   _calculateCycles: function (factory, template) {
     const level = Math.max(1, Math.floor(this._number(factory.level, 1)));
     const efficiency = Math.max(0, this._number(factory.efficiency, 1));
-    const baseCycles = Math.max(0, this._number(template.productionPerLevel, 1)) * level * efficiency;
-    const workersRequired = Math.max(0, this._number(template.workersPerLevel, 0)) * level;
-    if (workersRequired === 0) return baseCycles;
-
-    const workerRatio = Math.max(0, Math.min(1, this._number(factory.workers, 0) / workersRequired));
-    return baseCycles * workerRatio;
+    return Math.max(0, this._number(template.productionPerLevel, 1)) * level * efficiency;
   },
 
   _limitByInputs: function (stockpile, inputs, requestedCycles) {
@@ -245,7 +240,6 @@ const FactorySystem = {
     if (!this._isText(factory.status)) factory.status = 'ACTIVE';
     if (!this._isObject(factory.stockpile)) factory.stockpile = Object.create(null);
     if (!this._isFiniteNumber(factory.level) || factory.level < 1) factory.level = 1;
-    if (!this._isFiniteNumber(factory.workers) || factory.workers < 0) factory.workers = 0;
     if (!this._isFiniteNumber(factory.efficiency) || factory.efficiency < 0) factory.efficiency = 1;
   },
 
