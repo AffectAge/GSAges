@@ -224,7 +224,7 @@ const GAME_RULES = {
     },
     elevation: {
       freeElevationM: 250,
-      penaltyPer1000MAboveFree: 0.2,
+      penaltyPer1000MAboveFree: 0.4,
     },
     seasonBonus: {
       'Весна': 0.10,
