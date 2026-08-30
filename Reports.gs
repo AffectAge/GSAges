@@ -52,6 +52,8 @@ function buildProvinceInformation(province, ownerId, config) {
   const pollution = valueOrDash(province.pollution);
   const radiation = valueOrDash(province.radiation);
   const seaAccess = province.hasSeaAccess === true ? 'есть выход к морю' : 'нет выхода к морю';
+  const isWater = ProvinceRuleUtils.includes(GAME_RULES.landscape.waterTerrainTypes, province.terrainType);
+  const landscape = isWater ? 'не применяется' : valueOrDash(province.landscapeType);
 
   return '🗺️ ' + (province.name || ('Провинция ' + province.id)) + ' (ID ' + valueOrDash(province.id) + ')\n' +
     '🏛️ Владелец: ' + ownerName + ' [' + ownerId + ']\n' +
@@ -59,7 +61,7 @@ function buildProvinceInformation(province, ownerId, config) {
       ' · ' + valueOrDash(province.latitudeZone) + ' · ' + valueOrDash(province.season) + '\n' +
     '🌦️ ' + valueOrDash(province.climate) + ' · 🌡️ ' + valueOrDash(province.temperatureC) +
       ' °C · 🌧️ ' + valueOrDash(province.precipitationMm) + ' мм/год\n' +
-    '🏞️ ' + valueOrDash(province.terrainType) + ' · ' + valueOrDash(province.landscapeType) +
+    '🏞️ ' + valueOrDash(province.terrainType) + ' · ' + landscape +
       ' · ⛰️ ' + valueOrDash(province.elevationM) + ' м · 🌊 ' + seaAccess + '\n' +
     '📐 Площадь: ' + valueOrDash(province.areaKm2) + ' км² · 🌾 Плодородие: ' + fertility + '\n' +
     '⛏️ Ресурсы: ' + resources + '\n' +

@@ -45,6 +45,7 @@ const GAME_TURN_CONFIG = {
     // { id: 'FACTORIES', priority: 100, handler: processFactories },
     // { id: 'ECONOMY', priority: 200, handler: processEconomy },
     { id: 'PROVINCE_SEASONS', priority: 600, handler: processProvinceSeasons },
+    { id: 'PROVINCE_LANDSCAPE', priority: 650, handler: processProvinceLandscape },
     { id: 'PROVINCE_CLIMATE', priority: 700, handler: processProvinceClimate },
     { id: 'PROVINCE_FERTILITY', priority: 800, handler: processProvinceFertility },
     { id: 'PROVINCE_REPORTS', priority: 900, handler: processProvinceReports },

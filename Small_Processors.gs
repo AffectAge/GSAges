@@ -31,6 +31,61 @@ function getSeasonForTurn(turn, settings) {
   return cycle[Math.floor((turn - 1) / turnsPerSeason) % cycle.length];
 }
 
+/** Calculates province.landscapeType from elevationM and GAME_RULES.landscape. */
+
+function processProvinceLandscape(data, ctx) {
+  const rules = GAME_RULES;
+  const provinces = ctx.getColumn(rules.provinces.rangeName, rules.provinces.header);
+
+  provinces.forEach(function (province) {
+    if (ProvinceRuleUtils.isBlank(province)) return;
+    ProvinceRuleUtils.assertProvince(province, rules.provinces);
+
+    const fields = rules.provinces.fields;
+    if (ProvinceRuleUtils.includes(rules.landscape.waterTerrainTypes, province[fields.terrain])) {
+      province[fields.landscape] = null;
+      return;
+    }
+    if (province[fields.landscapeLocked] === true) return;
+
+    const elevation = ProvinceRuleUtils.number(province[fields.elevation]);
+    if (elevation === null) {
+      throw new Error('Для определения ландшафта у провинции «' + (province.name || province.id || 'без ID') + '» нужно числовое elevationM.');
+    }
+    const landscape = getLandscapeForElevation(elevation, rules.landscape.rules);
+    if (!landscape) {
+      throw new Error('Для высоты ' + elevation + ' м не найдено правило GAME_RULES.landscape.rules.');
+    }
+    province[fields.landscape] = landscape;
+  });
+
+  return data;
+}
+
+function getLandscapeForElevation(elevation, landscapeRules) {
+  if (!Array.isArray(landscapeRules) || !landscapeRules.length) {
+    throw new Error('GAME_RULES.landscape.rules должен содержать хотя бы одно правило.');
+  }
+  for (let index = 0; index < landscapeRules.length; index += 1) {
+    const rule = landscapeRules[index];
+    if (!rule || typeof rule.title !== 'string' || !rule.title.trim()) {
+      throw new Error('Каждое правило GAME_RULES.landscape.rules должно иметь непустой title.');
+    }
+    const min = rule.elevationMin;
+    const max = rule.elevationMax;
+    if (min !== undefined && (typeof min !== 'number' || !isFinite(min))) {
+      throw new Error('elevationMin правила ландшафта должен быть числом.');
+    }
+    if (max !== undefined && (typeof max !== 'number' || !isFinite(max))) {
+      throw new Error('elevationMax правила ландшафта должен быть числом.');
+    }
+    if ((min === undefined || elevation >= min) && (max === undefined || elevation <= max)) {
+      return rule.title;
+    }
+  }
+  return null;
+}
+
 /** Calculates province.fertility from the editable GAME_RULES.fertility rules. */
 
 function processProvinceFertility(data, ctx) {

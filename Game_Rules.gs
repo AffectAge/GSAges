@@ -22,6 +22,7 @@ const GAME_RULES = {
       seaAccess: 'hasSeaAccess',
       terrain: 'terrainType',
       landscape: 'landscapeType',
+      landscapeLocked: 'landscapeLocked',
       pollution: 'pollution',
       radiation: 'radiation',
       latitudeZone: 'latitudeZone',
@@ -53,6 +54,17 @@ const GAME_RULES = {
   seasons: {
     turnsPerSeason: 1,
     cycle: ['Весна', 'Лето', 'Осень', 'Зима'],
+  },
+
+  landscape: {
+    waterTerrainTypes: ['Озеро', 'Море', 'Океан', 'Прибрежные воды'],
+    // The first matching rule is selected. Boundaries are inclusive.
+    rules: [
+      { title: 'Равнина', elevationMin: -500, elevationMax: 250 },
+      { title: 'Холмы', elevationMin: 251, elevationMax: 600 },
+      { title: 'Низкогорье', elevationMin: 601, elevationMax: 1500 },
+      { title: 'Горы', elevationMin: 1501 },
+    ],
   },
 
   climate: {
@@ -201,24 +213,24 @@ const GAME_RULES = {
     temperature: {
       optimalMin: 15,
       optimalMax: 30,
-      optimalBonus: 10.0,
-      penaltyPerDegreeOutside: 1.0,
+      optimalBonus: 0.5,
+      penaltyPerDegreeOutside: 0.05,
     },
     precipitation: {
       optimalMin: 500,
       optimalMax: 1200,
-      optimalBonus: 10.0,
-      penaltyPer100MmOutside: 1.0,
+      optimalBonus: 0.5,
+      penaltyPer100MmOutside: 0.05,
     },
     elevation: {
       freeElevationM: 250,
-      penaltyPer1000MAboveFree: 20.0,
+      penaltyPer1000MAboveFree: 0.2,
     },
     seasonBonus: {
-      'Весна': 0.08,
-      'Лето': 0.12,
-      'Осень': 0.03,
-      'Зима': -0.18,
+      'Весна': 0.10,
+      'Лето': 0.15,
+      'Осень': 0.05,
+      'Зима': -0.40,
     },
 
     // Pollution and radiation are used as raw values. The coefficients below
