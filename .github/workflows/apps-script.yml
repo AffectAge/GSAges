@@ -1,0 +1,55 @@
+name: Sync Google Apps Script
+on:
+  push:
+    branches: [civ]
+    paths:
+      - '*.gs'
+      - 'scripts/prepare-apps-script.py'
+      - '.github/workflows/apps-script.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: gsages-apps-script
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/civ'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install official Google CLI
+        run: npm install --global @google/clasp@3.4.1
+      - name: Load Google authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          raw = os.environ.get("CLASPRC_JSON", "")
+          if not raw:
+              raise SystemExit("Add the CLASPRC_JSON repository secret. See APPS_SCRIPT_SYNC.md.")
+          json.loads(raw)
+          target = pathlib.Path.home() / ".clasprc.json"
+          target.write_text(raw, encoding="utf-8")
+          target.chmod(0o600)
+          PY
+      - name: Download current project
+        run: |
+          mkdir .apps-script-sync
+          cd .apps-script-sync
+          clasp clone-script 1ArxSXXuUjy5th8-M2DQ7Gl9TOD6QFXmxk1XZMkHyaG-B-K7Mhq8qyfrS
+      - name: Validate and prepare project
+        run: python3 scripts/prepare-apps-script.py . .apps-script-sync
+      - name: Save previous version and update code
+        working-directory: .apps-script-sync
+        run: |
+          clasp create-version "Before GitHub sync ${GITHUB_SHA:0:12}"
+          clasp push --force
+      - name: Remove credentials
+        if: always()
+        run: rm -f "$HOME/.clasprc.json"
