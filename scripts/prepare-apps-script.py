@@ -12,6 +12,9 @@ def prepare(source, target):
     if not scripts:
         raise ValueError("No repository .gs files found")
     names = {path.stem for path in scripts}
+    # The linked project uses this historical name for the same engine.
+    aliases = {"GAME_TURN_ENGINE": "GameTurnEngine"}
+    legacy_names = {old for old, new in aliases.items() if new in names}
     config = json.loads((target / ".clasp.json").read_text(encoding="utf-8"))
     expected = "1ArxSXXuUjy5th8-M2DQ7Gl9TOD6QFXmxk1XZMkHyaG-B-K7Mhq8qyfrS"
     if config.get("scriptId") != expected:
@@ -23,7 +26,7 @@ def prepare(source, target):
     unknown = [path.relative_to(target).as_posix()
                for path in target.rglob("*")
                if path.suffix in {".js", ".gs"} and path.is_file()
-               and (path.parent != target or path.stem not in names)]
+               and (path.parent != target or path.stem not in names | legacy_names)]
     if unknown:
         raise ValueError("Project contains code absent from GitHub. Import it into the repository "
                          "or reconcile it before syncing: " + ", ".join(sorted(unknown)))
@@ -38,6 +41,11 @@ def prepare(source, target):
                             encoding="utf-8")
         subprocess.run(["node", "--check", str(combined)], check=True)
     # clasp clone may produce .js rather than .gs. Avoid uploading both.
+    for name in legacy_names:
+        for suffix in (".js", ".gs"):
+            existing = target / (name + suffix)
+            if existing.exists():
+                existing.unlink()
     for path in scripts:
         for suffix in (".js", ".gs"):
             existing = target / (path.stem + suffix)
