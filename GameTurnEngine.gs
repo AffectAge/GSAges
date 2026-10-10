@@ -101,6 +101,8 @@ function onOpen() {
     .addItem('Инициализировать журнал', 'INITIALIZE_GAME_TURN_ENGINE')
     .addItem('Заполнить пустые провинции', 'GENERATE_EMPTY_PROVINCES')
     .addItem('Обработать ход', 'PROCESS_GAME_TURN')
+    .addItem('Создать управление ходом', 'INITIALIZE_GAME_TURN_CONTROL')
+    .addItem('Включить запуск по флажку', 'INSTALL_GAME_TURN_EDIT_TRIGGER')
     .addToUi();
 }
 
