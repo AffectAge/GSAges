@@ -1,7 +1,7 @@
 name: Sync Google Apps Script
 on:
   push:
-    branches: [civ]
+    branches: [main]
     paths:
       - '*.gs'
       - 'scripts/prepare-apps-script.py'
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   sync:
-    if: github.ref == 'refs/heads/civ'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
