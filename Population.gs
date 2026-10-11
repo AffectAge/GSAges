@@ -70,6 +70,11 @@ const GamePopulation = {
           ' должна содержать JSON-массив групп.');
       }
       cell.forEach(function (group) {
+        // Older groups gain a race in memory; persist only after a successful turn.
+        if (group && typeof group === 'object' && !Array.isArray(group) &&
+            group.race === undefined) {
+          group = Object.assign({}, group, { race: GAME_RULES.population.defaultRace });
+        }
         GamePopulation.validate(group, provinces);
         if (ids[group.id]) throw new GameTurnDataError('Повторяющийся id группы населения: ' + group.id);
         ids[group.id] = true;
@@ -89,7 +94,7 @@ const GamePopulation = {
     if (!Number.isSafeInteger(group.provinceId) || !provinces[group.provinceId]) {
       throw new GameTurnDataError('Группа «' + group.id + '»: неизвестная провинция ' + group.provinceId);
     }
-    ['culture', 'religion'].forEach(function (key) {
+    ['race', 'culture', 'religion'].forEach(function (key) {
       if (typeof group[key] !== 'string' || !group[key].trim()) {
         throw new GameTurnDataError('Группа «' + group.id + '»: ' + key + ' должна быть непустой строкой.');
       }
@@ -188,6 +193,7 @@ const GamePopulation = {
       group.id = id;
       group.provinceId = province.id;
       group.total = group.men + group.women;
+      if (group.race === undefined) group.race = rules.defaultRace;
       // Defaults apply only on creation, never during a turn.
       if (group.birthRate === undefined) group.birthRate = rules.defaultBirthRate;
       if (group.deathRate === undefined) group.deathRate = rules.defaultDeathRate;

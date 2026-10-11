@@ -152,6 +152,7 @@ const GameTurnProvinceGenerator = {
 const POPULATION_TEMPLATE_GENERATOR_CONFIG = {
   firstId: 1,
   template: {
+    race: 'Люди',
     culture: 'Примитивная культура',
     religion: 'Анимизм',
     men: 10000,

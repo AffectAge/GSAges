@@ -10,8 +10,9 @@ const GAME_RULES = {
     rangeName: 'Игровые_данные',
     header: 'Население',
     provinceHeader: 'Провинции',
-    // One turn = three months; annual rates are scaled by this value.
-    yearsPerTurn: 0.25,
+    // One turn = one year.
+    yearsPerTurn: 1,
+    defaultRace: 'Люди',
     // Configurable starting rates, not Victoria 3's full SoL-dependent model.
     defaultBirthRate: 0.035,
     defaultDeathRate: 0.025,
