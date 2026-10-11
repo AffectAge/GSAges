@@ -6,6 +6,7 @@ on:
       - '*.gs'
       - 'scripts/prepare-apps-script.py'
       - '.github/workflows/apps-script.yml'
+      - 'tests/population.test.cjs'
   workflow_dispatch:
 permissions:
   contents: read
@@ -22,6 +23,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Test population mechanics
+        run: node tests/population.test.cjs
       - name: Install official Google CLI
         run: npm install --global @google/clasp@3.4.1
       - name: Load Google authorization
