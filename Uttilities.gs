@@ -147,3 +147,15 @@ const GameTurnProvinceGenerator = {
     return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date);
   },
 };
+
+/** One group per province without population; reruns preserve existing groups. */
+const POPULATION_TEMPLATE_GENERATOR_CONFIG = {
+  firstId: 1,
+  template: {
+    culture: 'italian',
+    religion: 'catholic',
+    men: 1000,
+    women: 1000,
+    // birthRate/deathRate can be overridden here; otherwise GAME_RULES defaults apply.
+  },
+};
