@@ -49,6 +49,7 @@ const GAME_TURN_CONFIG = {
     { id: 'PROVINCE_CLIMATE', priority: 700, handler: processProvinceClimate },
     { id: 'PROVINCE_FERTILITY', priority: 800, handler: processProvinceFertility },
     { id: 'POPULATION', priority: 850, handler: processPopulation },
+    { id: 'ECONOMY', priority: 875, handler: processEconomy },
     { id: 'PROVINCE_REPORTS', priority: 900, handler: processProvinceReports },
   ],
 
@@ -57,6 +58,7 @@ const GAME_TURN_CONFIG = {
   validators: [
     validateGameTurnData,
     validatePopulationData,
+    validateEconomyData,
   ],
 
   // One technical GameLog row is added after every successful registered
@@ -103,6 +105,7 @@ function onOpen() {
     .addItem('Инициализировать журнал', 'INITIALIZE_GAME_TURN_ENGINE')
     .addItem('Заполнить пустые провинции', 'GENERATE_EMPTY_PROVINCES')
     .addItem('Создать население провинций', 'GENERATE_INITIAL_POPULATION')
+    .addItem('Подготовить здания и рынки', 'INITIALIZE_BUILDING_ECONOMY')
     .addItem('Обработать ход', 'PROCESS_GAME_TURN')
     .addItem('Создать управление ходом', 'INITIALIZE_GAME_TURN_CONTROL')
     .addItem('Включить запуск по флажку', 'INSTALL_GAME_TURN_EDIT_TRIGGER')
@@ -987,3 +990,4 @@ const GameTurnStateStorage = {
     }
   },
 };
+

@@ -6,7 +6,7 @@ on:
       - '*.gs'
       - 'scripts/prepare-apps-script.py'
       - '.github/workflows/apps-script.yml'
-      - 'tests/population.test.cjs'
+      - 'tests/*.cjs'
   workflow_dispatch:
 permissions:
   contents: read
@@ -24,7 +24,9 @@ jobs:
         with:
           node-version: '22'
       - name: Test population mechanics
-        run: node tests/population.test.cjs
+        run: |
+          node tests/population.test.cjs
+          node tests/economy.test.cjs
       - name: Install official Google CLI
         run: npm install --global @google/clasp@3.4.1
       - name: Load Google authorization
@@ -56,3 +58,4 @@ jobs:
       - name: Remove credentials
         if: always()
         run: rm -f "$HOME/.clasprc.json"
+

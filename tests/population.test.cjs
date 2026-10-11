@@ -8,7 +8,7 @@ const context = { assert, console,
   processProvinceFertility() {}, processProvinceReports() {}
 };
 vm.createContext(context);
-vm.runInContext(['Game_Rules.gs', 'GameTurnEngine.gs', 'Uttilities.gs', 'Population.gs']
+vm.runInContext(['Game_Rules.gs', 'GameTurnEngine.gs', 'Uttilities.gs', 'Population.gs', 'Economy.gs']
   .map(file => fs.readFileSync(path.join(root, file), 'utf8')).join('\n'), context);
 vm.runInContext(`
 const make = (id = 'pop_1', overrides = {}) => Object.assign({
@@ -98,4 +98,5 @@ assert.throws(() => GameTurnEngine._processUnlocked({}), /одну ячейку/
 assert.equal(gameWrites, 0);assert.equal(fatal, 1);assert.equal(stateTurn, 5);
 console.log('PASS: demographics, truncation, validation, exact packing boundaries, repeat-safe generation, no writes on overflow, fatal journal and unchanged turn');
 `, context);
+
 

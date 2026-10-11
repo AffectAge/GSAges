@@ -73,7 +73,10 @@ function formatProvinceResources(resources) {
   if (!Array.isArray(resources) || !resources.length) return 'не указаны';
   return resources.map(function (resource) {
     if (!resource || typeof resource !== 'object') return 'неизвестный ресурс';
-    return valueOrDash(resource.type) + ' — ' + valueOrDash(resource.amount);
+    const name = valueOrDash(resource.type || resource.id);
+    if (resource.mode === 'annual') return name + ' — лимит ' + valueOrDash(resource.annualCapacity) + '/год';
+    const regeneration = resource.mode === 'renewable' ? ' (восстановление ' + valueOrDash(resource.regeneration) + '/год)' : '';
+    return name + ' — ' + valueOrDash(resource.amount) + regeneration;
   }).join('; ');
 }
 
@@ -94,3 +97,4 @@ function valueOrDash(value) {
 function isProvinceReportObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date);
 }
+
