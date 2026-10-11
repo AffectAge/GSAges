@@ -152,10 +152,10 @@ const GameTurnProvinceGenerator = {
 const POPULATION_TEMPLATE_GENERATOR_CONFIG = {
   firstId: 1,
   template: {
-    culture: 'italian',
-    religion: 'catholic',
-    men: 1000,
-    women: 1000,
+    culture: 'Примитивная культура',
+    religion: 'Анимизм',
+    men: 10000,
+    women: 10000,
     // birthRate/deathRate can be overridden here; otherwise GAME_RULES defaults apply.
   },
 };
