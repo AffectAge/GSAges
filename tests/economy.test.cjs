@@ -57,5 +57,32 @@ c=fixture();c.Страны[0][1].workerCoefficients={men:.025,women:.025};c['Ш�
 // Transport output is available only next turn.
 c=fixture();c.Провинции[1].transport.baseCapacity=0;c['Шаблоны зданий'][0][1].transportCapacity=1000;s=run(c);assert.equal(s.buildingsById.mine.inventory.iron,0);assert.equal(s.provinces[2].transport.buildingCapacity,1000);s=run(c);assert.equal(s.buildingsById.mine.inventory.iron,100);
 
+// Unowned provinces retain demographics, money and inventories, but cannot hire or trade.
+[undefined,null,'','   ','NULL','null'].forEach(owner=>{
+ c=fixture();if(owner===undefined)delete c.Провинции[0].ownerId;else c.Провинции[0].ownerId=owner;
+ c.Здания[0][0].inventory={tools:10,iron:100};c.Население[0][0].money=42;
+ const priorPopulation=clone(c.Население[0][0]);
+ const data={Игровые_данные:c};processPopulation(data,{config:{maxJsonCellCharacters:48000}});
+ s=run(c);const mine=s.buildingsById.mine,g=s.populationById.p1;
+ assert.equal(mine.lastTurn.utilization,0);assert(mine.lastTurn.reasons.includes('Нет владельца провинции'));
+ assert.equal(mine.money,1000);assert.equal(mine.inventory.tools,10);assert.equal(mine.inventory.iron,100);
+ assert.equal(mine.employment.length,0);assert.equal(g.money,42);assert.equal(g.workforce.available,0);
+ assert.equal(g.workforce.free,0);assert.equal(Object.keys(g.workforce.byProfession).length,0);
+ assert.equal(g.total,priorPopulation.total);assert.equal(s.resources[1].ore.amount,1000);
+ // Acquiring a valid owner reactivates staffing and production normally.
+ c.Провинции[0].ownerId='A';s=run(c);assert.equal(s.buildingsById.mine.lastTurn.utilization,1);
+ assert.equal(s.populationById.p1.workforce.available,100);
+});
+// A neutral population must not stop production in an owned province.
+c=fixture();c.Провинции.push({id:3,ownerId:null,neighbors:[],resources:[]});
+const neutral=clone(c.Население[0][0]);neutral.id='neutral';neutral.provinceId=3;neutral.birthRate=.035;neutral.deathRate=.025;c.Население[0].push(neutral);
+processPopulation({Игровые_данные:c},{config:{maxJsonCellCharacters:48000}});s=run(c);
+assert.equal(s.populationById.neutral.total,202);assert.equal(s.populationById.neutral.workforce.available,0);
+assert.equal(s.buildingsById.mine.inventory.iron,100);
+// Entirely neutral economies need no fictional NULL country.
+c=fixture();c.Провинции.forEach(p=>p.ownerId='NULL');c.Страны=[[]];c.Рынки=[[]];c['Торговые отношения']=[[]];s=run(c);
+assert(s.buildings.every(b=>b.lastTurn.utilization===0));assert(s.population.every(g=>g.workforce.available===0));
+// Misspelled real owners still fail rather than silently becoming neutral.
+c=fixture();c.Провинции[0].ownerId='TYPO';assert.throws(()=>run(c),/неизвестный владелец TYPO/);
 console.log('PASS: trade snapshots, money conservation, tariffs, transit, capacity, population pay, extraction modes, storage, subsidies, conditions, invalid setup and packing rollback');
 `,context);

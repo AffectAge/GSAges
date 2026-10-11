@@ -14,7 +14,7 @@ function processEconomy(data, ctx) {
   if (!state.buildings.length) return data;
   GameEconomy.run(state);
   GameEconomy.save(state, columns, ctx.config.maxJsonCellCharacters);
-  if(ctx.log)state.buildings.forEach(b=>ctx.log({type:'GAME',category:'ECONOMY',country:state.provinces[b.provinceId].ownerId,visibility:'COUNTRY',ttl:1,message:(state.templatesById[b.templateId].name||b.templateId)+' ['+b.id+']: мощность '+Math.round(b.lastTurn.utilization*100)+'%, доход '+b.lastTurn.revenue.toFixed(2)+', расходы '+b.lastTurn.expenses.toFixed(2)+(b.lastTurn.reasons.length?'. '+b.lastTurn.reasons.join('; '):'')}));
+  if(ctx.log)state.buildings.forEach(b=>ctx.log({type:'GAME',category:'ECONOMY',country:GameEconomy.isUnowned(state.provinces[b.provinceId].ownerId)?'':state.provinces[b.provinceId].ownerId,visibility:GameEconomy.isUnowned(state.provinces[b.provinceId].ownerId)?'SYSTEM':'COUNTRY',ttl:1,message:(state.templatesById[b.templateId].name||b.templateId)+' ['+b.id+']: мощность '+Math.round(b.lastTurn.utilization*100)+'%, доход '+b.lastTurn.revenue.toFixed(2)+', расходы '+b.lastTurn.expenses.toFixed(2)+(b.lastTurn.reasons.length?'. '+b.lastTurn.reasons.join('; '):'')}));
   return data;
 }
 
@@ -28,6 +28,16 @@ function validateEconomyData(data, ctx) {
 
 const GameEconomy = {
   fail: function (message) { throw new GameTurnDataError('Экономика: ' + message); },
+  isUnowned: function (ownerId) {
+    return ownerId === undefined || ownerId === null ||
+      (typeof ownerId === 'string' && (!ownerId.trim() || ownerId.trim().toUpperCase() === 'NULL'));
+  },
+  country: function (s, province) {
+    if (this.isUnowned(province.ownerId)) return null;
+    const country = s.countriesById[province.ownerId];
+    if (!country) this.fail('провинция ' + province.id + ': неизвестный владелец ' + province.ownerId);
+    return country;
+  },
   number: function (n, label, integer) {
     if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > Number.MAX_SAFE_INTEGER ||
         (integer && !Number.isSafeInteger(n))) this.fail(label + ': нужно неотрицательное ' + (integer ? 'целое ' : '') + 'число.');
@@ -85,7 +95,7 @@ const GameEconomy = {
     });
     Object.values(s.provinces).forEach(p => {
       const active = s.buildings.some(b => b.provinceId === p.id);
-      if (active && !s.countriesById[p.ownerId]) this.fail('провинция ' + p.id + ': неизвестный владелец');
+      if (active) this.country(s, p);
       p.transport = p.transport || {baseCapacity:0, tariff:0, buildingCapacity:0};
       ['baseCapacity','tariff','buildingCapacity'].forEach(k => { if (p.transport[k] === undefined && k === 'buildingCapacity') p.transport[k] = 0; this.number(p.transport[k], 'транспорт ' + p.id + '.' + k); });
       if (p.neighbors !== undefined && (!Array.isArray(p.neighbors) || p.neighbors.some(id => !Number.isSafeInteger(id)))) this.fail('неверные соседи провинции ' + p.id);
@@ -161,7 +171,7 @@ const GameEconomy = {
   allowed:function(s,from,to){if(from===to)return true;const a=this.relation(s,from,to),b=this.relation(s,to,from);if((a&&a.embargo)||(b&&b.embargo))return false;return s.countriesById[from].marketId===s.countriesById[to].marketId||!!(a&&b&&a.tradeAllowed&&b.tradeAllowed);},
   route:function(s,from,to,buyer,weight){
     const dist=Object.create(null),paths=Object.create(null),visited=new Set();
-    const permitted=p=>{if(!s.countriesById[p.ownerId])return false;if(p.ownerId!==buyer&&p.id!==from&&p.id!==to){const d=this.relation(s,p.ownerId,buyer);if(!d||!d.transitAllowed||d.embargo)return false;}return s.transport[p.id]>ECONOMY_RULES.epsilon&&s.transport[p.id]>=weight-ECONOMY_RULES.epsilon;};
+    const permitted=p=>{if(this.isUnowned(p.ownerId)||!s.countriesById[p.ownerId])return false;if(p.ownerId!==buyer&&p.id!==from&&p.id!==to){const d=this.relation(s,p.ownerId,buyer);if(!d||!d.transitAllowed||d.embargo)return false;}return s.transport[p.id]>ECONOMY_RULES.epsilon&&s.transport[p.id]>=weight-ECONOMY_RULES.epsilon;};
     if(!permitted(s.provinces[from])||!permitted(s.provinces[to]))return null;
     dist[from]=s.provinces[from].transport.tariff;paths[from]=[from];
     while(true){const next=Object.keys(dist).filter(id=>!visited.has(+id)).sort((a,b)=>dist[a]-dist[b]||+a-+b)[0];if(next===undefined)return null;const id=+next;if(id===to)return {path:paths[id],tariff:dist[id]};visited.add(id);(s.provinces[id].neighbors||[]).forEach(n=>{const p=s.provinces[n];if(!p||visited.has(n)||!permitted(p))return;const cost=dist[id]+p.transport.tariff;if(dist[n]===undefined||cost<dist[n]){dist[n]=cost;paths[n]=paths[id].concat(n);}});}
@@ -177,27 +187,28 @@ const GameEconomy = {
     const eps=ECONOMY_RULES.epsilon;
     s.transport=Object.create(null);s.remainingResources=Object.create(null);s.demand=Object.create(null);s.supply=Object.create(null);
     Object.values(s.provinces).forEach(p=>{s.transport[p.id]=p.transport.baseCapacity+p.transport.buildingCapacity;s.remainingResources[p.id]=Object.create(null);Object.keys(s.resources[p.id]).forEach(id=>{const r=s.resources[p.id][id];s.remainingResources[p.id][id]=r.mode==='annual'?r.annualCapacity:r.amount;});});
-    s.population.forEach(g=>{const c=s.countriesById[s.provinces[g.provinceId].ownerId];if(!c)this.fail('нет коэффициентов страны для населения '+g.id);g.money=g.money||0;g.workforce={available:Math.floor(g.men*c.workerCoefficients.men)+Math.floor(g.women*c.workerCoefficients.women),free:0,byProfession:{}};g.workforce.free=g.workforce.available;});
+    s.population.forEach(g=>{const c=this.country(s,s.provinces[g.provinceId]);g.money=g.money||0;g.workforce={available:c?Math.floor(g.men*c.workerCoefficients.men)+Math.floor(g.women*c.workerCoefficients.women):0,free:0,byProfession:{}};g.workforce.free=g.workforce.available;});
     const plans=s.buildings.map(b=>{
       const t=s.templatesById[b.templateId],p=s.provinces[b.provinceId];
-      const plan={b,t,p,c:s.countriesById[p.ownerId],efficiency:1,active:b.enabled!==false&&this.condition(t.requirements,p,s.resources[p.id]),hires:[],reasons:[],start:Object.assign({},b.inventory),salaryCost:0};
+      const c=this.country(s,p);
+      const plan={b,t,p,c,efficiency:1,active:!!c&&b.enabled!==false&&this.condition(t.requirements,p,s.resources[p.id]),hires:[],reasons:[],start:Object.assign({},b.inventory),salaryCost:0};
       (t.efficiencyModifiers||[]).forEach(x=>{if(this.condition(x.when,p,s.resources[p.id]))plan.efficiency*=x.multiplier;});
       this.number(plan.efficiency,'эффективность');if(!plan.efficiency)plan.active=false;
       b.lastTurn={utilization:0,efficiency:plan.efficiency,revenue:0,expenses:0,subsidy:0,reasons:plan.reasons};b.employment=[];
       t.workers.forEach(w=>{if(b.salaries[w.profession]===undefined)b.salaries[w.profession]=w.baseSalary;plan.salaryCost+=w.count*b.level*b.salaries[w.profession];});
-      if(!plan.active)plan.reasons.push('Отключено или не выполнены условия работы');
+      if(!plan.active)plan.reasons.push(!c?'Нет владельца провинции':'Отключено или не выполнены условия работы');
       return plan;
     });
     // Snapshot sale offers: no newly produced or purchased goods can be resold this turn.
     const offers=[];
-    plans.forEach(x=>{Object.keys(x.start).forEach(id=>{const input=x.t.inputs.find(i=>i.goodId===id);const amount=Math.max(0,x.start[id]-(input?input.amount*x.b.level:0));if(amount>eps){offers.push({x,id,remaining:amount});const k=x.c.marketId+':'+id;s.supply[k]=(s.supply[k]||0)+amount;}});x.t.inputs.forEach(i=>{if(x.active){const k=x.c.marketId+':'+i.goodId;s.demand[k]=(s.demand[k]||0)+Math.max(0,i.amount*x.b.level-(x.b.inventory[i.goodId]||0));}});});
+    plans.forEach(x=>{if(!x.c)return;Object.keys(x.start).forEach(id=>{const input=x.t.inputs.find(i=>i.goodId===id);const amount=Math.max(0,x.start[id]-(input?input.amount*x.b.level:0));if(amount>eps){offers.push({x,id,remaining:amount});const k=x.c.marketId+':'+id;s.supply[k]=(s.supply[k]||0)+amount;}});x.t.inputs.forEach(i=>{if(x.active){const k=x.c.marketId+':'+i.goodId;s.demand[k]=(s.demand[k]||0)+Math.max(0,i.amount*x.b.level-(x.b.inventory[i.goodId]||0));}});});
     // Subsidies are grants capped by both annual policy budget and treasury.
     s.countries.forEach(c=>{let budget=Math.min(c.treasury,c.subsidies.budget);const eligible=plans.filter(x=>x.active&&x.c===c&&c.subsidies.templateIds.includes(x.t.id)).sort((a,b)=>(b.b.priority||0)-(a.b.priority||0)||a.b.id.localeCompare(b.b.id));const tiers=[...new Set(eligible.map(x=>x.b.priority||0))];tiers.forEach(priority=>{const tier=eligible.filter(x=>(x.b.priority||0)===priority);const needs=tier.map(x=>Math.max(0,x.salaryCost+x.t.inputs.reduce((n,i)=>n+Math.max(0,i.amount*x.b.level-(x.b.inventory[i.goodId]||0))*this.price(s,c.id,i.goodId),0)-x.b.money));const total=needs.reduce((a,b)=>a+b,0),fraction=total?Math.min(1,budget/total):0;tier.forEach((x,i)=>{const grant=needs[i]*fraction;x.b.money+=grant;x.b.lastTurn.subsidy+=grant;c.treasury-=grant;budget-=grant;});});});
     // Labor allocated by priority, then offered salary; equal bids share proportionally.
     this.allocateLabor(plans,s);
     plans.forEach(x=>{x.labor=1;x.t.workers.forEach(w=>{if(w.count){const n=x.hires.filter(e=>e.profession===w.profession).reduce((n,e)=>n+e.count,0);x.labor=Math.min(x.labor,n/(w.count*x.b.level));}});x.labor=x.active?x.labor:0;x.workerShortage=x.active&&x.labor<1-eps;if(x.active&&x.labor<1-eps)x.reasons.push('Нехватка работников');});
     // Buyers with equal priority pay the same market quote. Fair-share rounds prevent one buyer taking all stock.
-    plans.forEach(x=>{const inputsCost=x.t.inputs.reduce((n,i)=>n+Math.max(0,i.amount*x.b.level-(x.b.inventory[i.goodId]||0))*this.price(s,x.c.id,i.goodId),0);if(x.salaryCost+inputsCost>0)x.labor=Math.min(x.labor,x.b.money/(x.salaryCost+inputsCost));});
+    plans.forEach(x=>{if(!x.c)return;const inputsCost=x.t.inputs.reduce((n,i)=>n+Math.max(0,i.amount*x.b.level-(x.b.inventory[i.goodId]||0))*this.price(s,x.c.id,i.goodId),0);if(x.salaryCost+inputsCost>0)x.labor=Math.min(x.labor,x.b.money/(x.salaryCost+inputsCost));});
     const buyers=plans.filter(x=>x.active).sort((a,b)=>(b.b.priority||0)-(a.b.priority||0)||a.b.id.localeCompare(b.b.id));
     const tiers=[...new Set(buyers.map(x=>x.b.priority||0))];
     tiers.forEach(priority=>{
