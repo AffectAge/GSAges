@@ -1,7 +1,7 @@
 /**
  * Change Управление!B2 to TRUE (or check its checkbox) to request one turn.
- * Default onEdit needs no setup, but Google limits it to 30 seconds.
- * Run INSTALL_GAME_TURN_EDIT_TRIGGER once for longer, authorized executions.
+ * Simple onEdit only displays setup/waiting status; it never runs a turn.
+ * Run INSTALL_GAME_TURN_EDIT_TRIGGER once for authorized executions.
  */
 const GAME_TURN_CONTROL_CONFIG = {
   sheetName: 'Управление',
@@ -10,24 +10,57 @@ const GAME_TURN_CONTROL_CONFIG = {
   finishedCell: 'B4',
 };
 
-function onEdit(event) {
-  if (!event || !event.source) return;
-  const key = 'GAME_TURN_EDIT_TRIGGER_' + event.source.getId();
-  if (PropertiesService.getScriptProperties().getProperty(key)) return;
-  HANDLE_GAME_TURN_EDIT(event);
-}
-
-function HANDLE_GAME_TURN_EDIT(event) {
-  if (!event || !event.range || !event.source) return;
+/** Accept direct checkbox edits and typed TRUE/ИСТИНА; never formulas. */
+function IS_GAME_TURN_REQUEST_EDIT(event) {
+  if (!event || !event.range || !event.source) return false;
   const edited = event.range;
   const config = GAME_TURN_CONTROL_CONFIG;
   if (edited.getSheet().getName() !== config.sheetName ||
       edited.getNumRows() !== 1 || edited.getNumColumns() !== 1 ||
-      edited.getA1Notation() !== config.requestCell ||
-      String(event.value).toUpperCase() !== 'TRUE') return;
-  // Ignore formulas: this is an explicit human request, not a calculation.
-  if (edited.getFormula()) return;
+      edited.getA1Notation() !== config.requestCell || edited.getFormula()) return false;
+  const value = event.value === undefined ? edited.getValue() : event.value;
+  return IS_GAME_TURN_TRUE(value);
+}
 
+function IS_GAME_TURN_TRUE(value) {
+  return value === true || ['TRUE', 'ИСТИНА'].includes(String(value).trim().toUpperCase());
+}
+
+function onEdit(event) {
+  if (!IS_GAME_TURN_REQUEST_EDIT(event)) return;
+  // An installed trigger may have been manually bound to onEdit itself.
+  if (event.triggerUid) return HANDLE_GAME_TURN_EDIT(event);
+  const key = 'GAME_TURN_EDIT_TRIGGER_' + event.source.getId();
+  if (PropertiesService.getScriptProperties().getProperty(key)) {
+    // Do not compete with the authorized trigger or overwrite its running/result status.
+    const lock = LockService.getDocumentLock();
+    if (!lock || !lock.tryLock(100)) return;
+    try {
+      if (IS_GAME_TURN_TRUE(event.range.getValue())) {
+        event.range.getSheet().getRange(GAME_TURN_CONTROL_CONFIG.statusCell).setValue(
+          'Ожидается установленный триггер. Если ход не запускается, выполните INSTALL_GAME_TURN_EDIT_TRIGGER в редакторе скриптов.');
+      }
+    } finally {
+      lock.releaseLock();
+    }
+    return;
+  }
+  const lock = LockService.getDocumentLock();
+  if (!lock || !lock.tryLock(100)) return;
+  try {
+    if (IS_GAME_TURN_TRUE(event.range.getValue())) {
+      event.range.getSheet().getRange(GAME_TURN_CONTROL_CONFIG.statusCell).setValue(
+        'Нужен установленный триггер. Выполните INSTALL_GAME_TURN_EDIT_TRIGGER в редакторе скриптов, затем измените B2 с FALSE на TRUE.');
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function HANDLE_GAME_TURN_EDIT(event) {
+  if (!IS_GAME_TURN_REQUEST_EDIT(event)) return;
+  const edited = event.range;
+  const config = GAME_TURN_CONTROL_CONFIG;
   const lock = LockService.getDocumentLock();
   // Never queue a second turn behind an already running turn.
   if (!lock || !lock.tryLock(100)) return;
@@ -36,7 +69,7 @@ function HANDLE_GAME_TURN_EDIT(event) {
     const sheet = edited.getSheet();
     const request = sheet.getRange(config.requestCell);
     const current = request.getValue();
-    if (current !== true && String(current).trim().toUpperCase() !== 'TRUE') return;
+    if (!IS_GAME_TURN_TRUE(current) || request.getFormula()) return;
     // Claim and reset before processing. Duplicate edit events see FALSE.
     request.setValue(false);
     claimed = true;
@@ -97,15 +130,19 @@ function INSTALL_GAME_TURN_EDIT_TRIGGER() {
         trigger.getEventType() === ScriptApp.EventType.ON_EDIT &&
         trigger.getTriggerSourceId() === spreadsheet.getId();
     });
-    if (properties.getProperty(key) && !triggers.length) {
-      throw new Error('Триггер уже зарегистрирован другим владельцем или был удалён. ' +
-        'Проверьте триггеры проекта и свойство ' + key + ' перед повторной установкой.');
-    }
+    // A stale property must not prevent repairing a deleted trigger.
+    // Other users' triggers are not visible, but request claiming under the
+    // document lock prevents multiple installed handlers processing one edit.
     const trigger = triggers[0] || ScriptApp.newTrigger('HANDLE_GAME_TURN_EDIT')
       .forSpreadsheet(spreadsheet).onEdit().create();
     properties.setProperty(key, trigger.getUniqueId());
     triggers.slice(1).forEach(function (extra) { ScriptApp.deleteTrigger(extra); });
+    spreadsheet.getSheetByName(GAME_TURN_CONTROL_CONFIG.sheetName)
+      .getRange(GAME_TURN_CONTROL_CONFIG.statusCell).setValue(
+        'Триггер установлен. Для запуска измените B2 с FALSE на TRUE.');
+    return { triggerId: trigger.getUniqueId(), spreadsheetId: spreadsheet.getId() };
   } finally {
     lock.releaseLock();
   }
 }
+

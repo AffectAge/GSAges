@@ -27,6 +27,7 @@ jobs:
         run: |
           node tests/population.test.cjs
           node tests/economy.test.cjs
+          node tests/turn-control.test.cjs
       - name: Install official Google CLI
         run: npm install --global @google/clasp@3.4.1
       - name: Load Google authorization
